@@ -32,14 +32,31 @@ st.markdown("""
             font-weight: 600 !important;
         }
         
+        /* Chat message text - CRITICAL for readability */
+        .stChatMessage p {
+            color: #1A1A1A !important;
+            font-size: 1rem !important;
+        }
+        
+        .stChatMessage div {
+            color: #1A1A1A !important;
+        }
+        
+        .stChatMessage {
+            border-left: 4px solid #F58426 !important;
+            background-color: #f8f9fa !important;
+        }
+        
+        /* Source excerpts */
         .source-excerpt {
             padding: 0.8rem 1rem !important;
             font-size: 0.9rem !important;
-            color: #2c3e50 !important;
+            color: #1A1A1A !important;
             background: linear-gradient(135deg, #FFF8F0 0%, #FFE4D1 100%) !important;
             border-left: 3px solid #F58426 !important;
         }
         
+        /* Rule location badges */
         .rule-location {
             font-size: 0.75rem !important;
             background: linear-gradient(135deg, #1A1A1A 0%, #2c2c2c 100%) !important;
@@ -47,11 +64,13 @@ st.markdown("""
             border: 2px solid #F58426 !important;
         }
         
+        /* Relevance badges */
         .relevance-badge {
             background: #F58426 !important;
             color: white !important;
         }
         
+        /* Metric containers */
         .metric-container {
             background: linear-gradient(135deg, #F58426 0%, #FF6B35 100%) !important;
             color: white !important;
@@ -65,19 +84,19 @@ st.markdown("""
             color: white !important;
         }
         
-        /* Ensure chat messages have proper styling on mobile */
-        .stChatMessage {
-            border-left: 4px solid #F58426 !important;
-        }
-        
-        /* Force text colors in mobile for better visibility */
-        p, span, div {
-            color: inherit !important;
+        /* Main content text */
+        .main p {
+            color: #1A1A1A !important;
         }
         
         /* Orange links on mobile */
         a {
             color: #F58426 !important;
+        }
+        
+        /* Ensure all markdown text is readable */
+        .stMarkdown {
+            color: #1A1A1A !important;
         }
     }
     
