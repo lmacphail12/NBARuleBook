@@ -98,6 +98,39 @@ st.markdown("""
         .stMarkdown {
             color: #1A1A1A !important;
         }
+        
+        /* MOBILE SCROLLING FIXES */
+        
+        /* Hide Streamlit footer on mobile - it blocks content */
+        footer {
+            display: none !important;
+        }
+        
+        /* Make bottom toolbar less intrusive */
+        .stBottom {
+            background: transparent !important;
+        }
+        
+        /* Adjust chat input container to not block content */
+        .stChatInputContainer {
+            position: relative !important;
+            bottom: 0 !important;
+            margin-bottom: 1rem !important;
+            background: white !important;
+            padding: 0.5rem !important;
+            border-top: 1px solid #e0e0e0 !important;
+        }
+        
+        /* Add padding to bottom of main content so chat input doesn't cover it */
+        .main {
+            padding-bottom: 100px !important;
+        }
+        
+        /* Ensure scrolling works smoothly */
+        .main, .stApp {
+            overflow-y: auto !important;
+            -webkit-overflow-scrolling: touch !important;
+        }
     }
     
     /* Tablet optimization */
@@ -251,6 +284,47 @@ st.markdown("""
         max-width: 100%;
     }
 </style>
+""", unsafe_allow_html=True)
+
+# Auto-scroll to bottom on mobile after messages
+st.markdown("""
+<script>
+    // Auto-scroll function for mobile devices
+    function scrollToBottom() {
+        // Check if on mobile
+        if (window.innerWidth <= 768) {
+            // Small delay to ensure content is rendered
+            setTimeout(function() {
+                window.scrollTo({
+                    top: document.body.scrollHeight,
+                    behavior: 'smooth'
+                });
+            }, 100);
+        }
+    }
+    
+    // Watch for new chat messages
+    const observer = new MutationObserver(function(mutations) {
+        mutations.forEach(function(mutation) {
+            if (mutation.addedNodes.length) {
+                scrollToBottom();
+            }
+        });
+    });
+    
+    // Start observing when page loads
+    window.addEventListener('load', function() {
+        const targetNode = document.querySelector('.main');
+        if (targetNode) {
+            observer.observe(targetNode, {
+                childList: true,
+                subtree: true
+            });
+        }
+        // Initial scroll
+        scrollToBottom();
+    });
+</script>
 """, unsafe_allow_html=True)
 
 # Initialize AWS Bedrock client
