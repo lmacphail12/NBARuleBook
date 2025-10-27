@@ -192,6 +192,16 @@ def get_bedrock_client():
     try:
         # Try to get credentials from Streamlit secrets first (for cloud deployment)
         if "aws" in st.secrets:
+            # Verify all required keys are present
+            required_keys = ["access_key_id", "secret_access_key"]
+            missing_keys = [key for key in required_keys if key not in st.secrets["aws"]]
+            
+            if missing_keys:
+                st.error(f"⚠️ Missing keys in secrets: {', '.join(missing_keys)}")
+                st.info("Your secrets should have:\n```\n[aws]\naccess_key_id = \"...\"\nsecret_access_key = \"...\"\nregion = \"us-east-1\"\n```")
+                return None
+            
+            st.success("✅ Using AWS credentials from Streamlit secrets")
             return boto3.client(
                 service_name='bedrock-agent-runtime',
                 aws_access_key_id=st.secrets["aws"]["access_key_id"],
@@ -199,14 +209,30 @@ def get_bedrock_client():
                 region_name=st.secrets["aws"].get("region", "us-east-1")
             )
         else:
-            # Fall back to default AWS credentials (for local development)
-            return boto3.client(
-                service_name='bedrock-agent-runtime',
-                region_name='us-east-1'  # Change to your region
-            )
+            # No secrets found - show clear error for Streamlit Cloud
+            st.error("⚠️ No AWS credentials found in secrets!")
+            st.info("""
+            **To fix this:**
+            1. Go to your Streamlit Cloud dashboard
+            2. Click the ⋮ menu on your app
+            3. Click "Settings" → "Secrets"
+            4. Add this format:
+            
+            ```toml
+            [aws]
+            access_key_id = "YOUR_ACCESS_KEY"
+            secret_access_key = "YOUR_SECRET_KEY"
+            region = "us-east-1"
+            
+            knowledge_base_id = "JFEGBVQF3O"
+            ```
+            
+            5. Click "Save" and wait for app to restart
+            """)
+            return None
     except Exception as e:
         st.error(f"⚠️ Error initializing Bedrock client: {str(e)}")
-        st.info("💡 **For Streamlit Cloud:** Add AWS credentials in Settings → Secrets\n\n💡 **For local:** Run `aws configure` or create `.streamlit/secrets.toml`")
+        st.info("💡 Check that your secrets are properly formatted in Streamlit Cloud Settings → Secrets")
         return None
 
 def query_knowledge_base(question, knowledge_base_id, model_arn):
