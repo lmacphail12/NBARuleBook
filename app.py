@@ -22,19 +22,62 @@ st.markdown("""
         
         h1 {
             font-size: 1.5rem !important;
+            color: #1A1A1A !important;
+            font-weight: 700 !important;
         }
         
         .subtitle {
             font-size: 0.9rem !important;
+            color: #F58426 !important;
+            font-weight: 600 !important;
         }
         
         .source-excerpt {
             padding: 0.8rem 1rem !important;
             font-size: 0.9rem !important;
+            color: #2c3e50 !important;
+            background: linear-gradient(135deg, #FFF8F0 0%, #FFE4D1 100%) !important;
+            border-left: 3px solid #F58426 !important;
         }
         
         .rule-location {
             font-size: 0.75rem !important;
+            background: linear-gradient(135deg, #1A1A1A 0%, #2c2c2c 100%) !important;
+            color: #F58426 !important;
+            border: 2px solid #F58426 !important;
+        }
+        
+        .relevance-badge {
+            background: #F58426 !important;
+            color: white !important;
+        }
+        
+        .metric-container {
+            background: linear-gradient(135deg, #F58426 0%, #FF6B35 100%) !important;
+            color: white !important;
+        }
+        
+        .metric-container h2 {
+            color: white !important;
+        }
+        
+        .metric-container p {
+            color: white !important;
+        }
+        
+        /* Ensure chat messages have proper styling on mobile */
+        .stChatMessage {
+            border-left: 4px solid #F58426 !important;
+        }
+        
+        /* Force text colors in mobile for better visibility */
+        p, span, div {
+            color: inherit !important;
+        }
+        
+        /* Orange links on mobile */
+        a {
+            color: #F58426 !important;
         }
     }
     
@@ -46,6 +89,14 @@ st.markdown("""
         
         .source-excerpt {
             font-size: 0.95rem !important;
+        }
+        
+        h1 {
+            color: #1A1A1A !important;
+        }
+        
+        .subtitle {
+            color: #F58426 !important;
         }
     }
     
