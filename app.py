@@ -201,7 +201,7 @@ def get_bedrock_client():
                 st.info("Your secrets should have:\n```\n[aws]\naccess_key_id = \"...\"\nsecret_access_key = \"...\"\nregion = \"us-east-1\"\n```")
                 return None
             
-            st.success("✅ Using AWS credentials from Streamlit secrets")
+            # Credentials found and valid - create client silently
             return boto3.client(
                 service_name='bedrock-agent-runtime',
                 aws_access_key_id=st.secrets["aws"]["access_key_id"],
