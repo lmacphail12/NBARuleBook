@@ -121,6 +121,32 @@ st.markdown("""
             border-top: 1px solid #e0e0e0 !important;
         }
         
+        /* Chat input text area - FIX for readable text */
+        .stChatInputContainer textarea {
+            color: #1A1A1A !important;
+            font-size: 1rem !important;
+            background-color: white !important;
+        }
+        
+        .stChatInputContainer input {
+            color: #1A1A1A !important;
+            font-size: 1rem !important;
+            background-color: white !important;
+        }
+        
+        /* Chat input placeholder text */
+        .stChatInputContainer textarea::placeholder,
+        .stChatInputContainer input::placeholder {
+            color: #666666 !important;
+            opacity: 0.7 !important;
+        }
+        
+        /* Send button in chat input */
+        .stChatInputContainer button {
+            background-color: #F58426 !important;
+            color: white !important;
+        }
+        
         /* Add padding to bottom of main content so chat input doesn't cover it */
         .main {
             padding-bottom: 100px !important;
