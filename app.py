@@ -240,12 +240,7 @@ Answer:"""
                 'type': 'KNOWLEDGE_BASE',
                 'knowledgeBaseConfiguration': {
                     'knowledgeBaseId': knowledge_base_id,
-                    'modelArn': model_arn,
-                    'retrievalConfiguration': {
-                        'vectorSearchConfiguration': {
-                            'numberOfResults': 10  # Increased from default 5 for better context
-                        }
-                    }
+                    'modelArn': model_arn
                 }
             }
         )
