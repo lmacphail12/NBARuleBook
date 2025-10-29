@@ -514,6 +514,41 @@ Answer:"""
     except ClientError as e:
         error_code = e.response['Error']['Code']
         error_message = e.response['Error']['Message']
+        
+        # Handle expired/invalid session - retry with new session
+        if error_code == 'ValidationException' and 'Session' in error_message and 'not valid' in error_message:
+            try:
+                # Generate a new session ID and retry
+                new_session_id = str(uuid.uuid4())
+                request_params['sessionId'] = new_session_id
+                
+                # Retry the request with new session
+                response = client.retrieve_and_generate(**request_params)
+                returned_session_id = response.get('sessionId', new_session_id)
+                generated_text = response['output']['text']
+                
+                # Extract citations
+                citations = []
+                if 'citations' in response:
+                    for citation in response['citations']:
+                        if 'retrievedReferences' in citation:
+                            for ref in citation['retrievedReferences']:
+                                content = ref.get('content', {}).get('text', 'No content available')
+                                location = ref.get('location', {})
+                                s3_location = location.get('s3Location', {})
+                                
+                                citation_data = {
+                                    'content': content,
+                                    'uri': s3_location.get('uri', 'Unknown source'),
+                                    'score': ref.get('metadata', {}).get('score', 0),
+                                    'metadata': ref.get('metadata', {})
+                                }
+                                citations.append(citation_data)
+                
+                return generated_text, citations, returned_session_id
+            except Exception as retry_error:
+                return f"Session expired and retry failed: {str(retry_error)}", [], None
+        
         return f"AWS Error ({error_code}): {error_message}", [], session_id
     except Exception as e:
         return f"Error querying knowledge base: {str(e)}", [], session_id
@@ -606,6 +641,7 @@ def main():
             - Reference rule sections or numbers
             - Ask for clarifications
             - Compare different scenarios
+            - **Ask follow-up questions** - I remember our conversation!
             """)
         else:  # CBA mode
             st.markdown("""
@@ -613,6 +649,7 @@ def main():
             - Contract structures and types
             - Free agency regulations
             - Trade and roster rules
+            - **Ask follow-up questions** - I remember our conversation!
             """)
         
         st.markdown("---")
