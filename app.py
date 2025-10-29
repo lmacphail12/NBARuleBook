@@ -61,6 +61,12 @@ if "session_ids" not in st.session_state:
         "rulebook": None,
         "cba": None
     }
+# Track last used configuration to detect changes
+if "last_config" not in st.session_state:
+    st.session_state.last_config = {
+        "rulebook": {"model": None, "kb_id": None},
+        "cba": {"model": None, "kb_id": None}
+    }
 
 # Get current theme
 theme = THEMES[st.session_state.mode]
@@ -515,6 +521,40 @@ Answer:"""
         error_code = e.response['Error']['Code']
         error_message = e.response['Error']['Message']
         
+        # Handle configuration change in active session - retry with new session
+        if error_code == 'ValidationException' and 'Knowledge base configurations cannot be modified' in error_message:
+            try:
+                # Remove the old session ID and let AWS create a new one
+                if 'sessionId' in request_params:
+                    del request_params['sessionId']
+                
+                # Retry the request - AWS will create a new session automatically
+                response = client.retrieve_and_generate(**request_params)
+                returned_session_id = response.get('sessionId', None)
+                generated_text = response['output']['text']
+                
+                # Extract citations
+                citations = []
+                if 'citations' in response:
+                    for citation in response['citations']:
+                        if 'retrievedReferences' in citation:
+                            for ref in citation['retrievedReferences']:
+                                content = ref.get('content', {}).get('text', 'No content available')
+                                location = ref.get('location', {})
+                                s3_location = location.get('s3Location', {})
+                                
+                                citation_data = {
+                                    'content': content,
+                                    'uri': s3_location.get('uri', 'Unknown source'),
+                                    'score': ref.get('metadata', {}).get('score', 0),
+                                    'metadata': ref.get('metadata', {})
+                                }
+                                citations.append(citation_data)
+                
+                return generated_text, citations, returned_session_id
+            except Exception as retry_error:
+                return f"Configuration changed and retry failed: {str(retry_error)}", [], None
+        
         # Handle expired/invalid session - retry WITHOUT session ID to start fresh
         if error_code == 'ValidationException' and 'Session' in error_message and 'not valid' in error_message:
             try:
@@ -570,6 +610,8 @@ def main():
         if selected_mode != st.session_state.mode:
             st.session_state.mode = selected_mode
             st.session_state.messages = []
+            # Reset session ID when switching modes (different knowledge bases)
+            st.session_state.session_ids[selected_mode] = None
             st.rerun()
     
     # Get current theme
@@ -619,6 +661,17 @@ def main():
         
         model_arn = model_options[model_display]
         
+        # Check if model or KB changed - reset session if so
+        current_mode = st.session_state.mode
+        last_model = st.session_state.last_config[current_mode]["model"]
+        last_kb = st.session_state.last_config[current_mode]["kb_id"]
+        
+        if last_model != model_arn or last_kb != kb_id:
+            # Configuration changed - reset session for this mode
+            st.session_state.session_ids[current_mode] = None
+            st.session_state.last_config[current_mode]["model"] = model_arn
+            st.session_state.last_config[current_mode]["kb_id"] = kb_id
+        
         st.markdown("---")
         
         # Session statistics
@@ -665,6 +718,8 @@ def main():
         - Complex questions → Sonnet 4.5
         - Simple lookups → Haiku 4.5
         - Edge cases → Opus 4.1
+        
+        **Note:** Changing models starts a new session (conversation restarts).
         """)
         
         st.markdown("---")
