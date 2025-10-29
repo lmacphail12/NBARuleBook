@@ -1,6 +1,7 @@
 import streamlit as st
 import boto3
 import json
+import uuid
 from botocore.exceptions import ClientError
 
 # Page configuration
@@ -54,6 +55,12 @@ if "mode" not in st.session_state:
     st.session_state.mode = "rulebook"
 if "messages" not in st.session_state:
     st.session_state.messages = []
+# Initialize session IDs for conversation memory (one per mode)
+if "session_ids" not in st.session_state:
+    st.session_state.session_ids = {
+        "rulebook": None,
+        "cba": None
+    }
 
 # Get current theme
 theme = THEMES[st.session_state.mode]
@@ -414,12 +421,16 @@ def get_bedrock_client():
         st.error(f"⚠️ Error initializing Bedrock client: {str(e)}")
         return None
 
-def query_knowledge_base(question, knowledge_base_id, model_arn, mode="rulebook"):
-    """Query the Bedrock Knowledge Base"""
+def query_knowledge_base(question, knowledge_base_id, model_arn, mode="rulebook", session_id=None):
+    """Query the Bedrock Knowledge Base with conversation memory support"""
     client = get_bedrock_client()
     
     if not client:
-        return "Error: Could not initialize Bedrock client", []
+        return "Error: Could not initialize Bedrock client", [], None
+    
+    # Generate a new session ID if none provided
+    if session_id is None:
+        session_id = str(uuid.uuid4())
     
     try:
         # Enhanced prompt based on mode
@@ -435,6 +446,7 @@ Instructions for your answer:
 4. Always cite specific rules (e.g., "According to Rule 12, Section II...")
 5. Be confident in logical inferences that follow from the stated rules
 6. Provide clear, comprehensive explanations with your reasoning
+7. Remember the context of our conversation - if this is a follow-up question, reference what we previously discussed
 
 Answer:"""
         else:  # CBA mode
@@ -449,21 +461,32 @@ Instructions for your answer:
 4. Explain complex financial terms in clear language
 5. If discussing salary cap implications, include relevant numbers or percentages when applicable
 6. Provide practical examples when helpful
+7. Remember the context of our conversation - if this is a follow-up question, reference what we previously discussed
 
 Answer:"""
 
-        response = client.retrieve_and_generate(
-            input={
+        # Build the API request with sessionId for conversation memory
+        request_params = {
+            'input': {
                 'text': enhanced_prompt
             },
-            retrieveAndGenerateConfiguration={
+            'retrieveAndGenerateConfiguration': {
                 'type': 'KNOWLEDGE_BASE',
                 'knowledgeBaseConfiguration': {
                     'knowledgeBaseId': knowledge_base_id,
                     'modelArn': model_arn
                 }
             }
-        )
+        }
+        
+        # Add sessionId to maintain conversation context
+        if session_id:
+            request_params['sessionId'] = session_id
+        
+        response = client.retrieve_and_generate(**request_params)
+        
+        # Get the session ID from response (will be the same or newly generated)
+        returned_session_id = response.get('sessionId', session_id)
         
         # Extract the generated response
         generated_text = response['output']['text']
@@ -486,14 +509,14 @@ Answer:"""
                         }
                         citations.append(citation_data)
         
-        return generated_text, citations
+        return generated_text, citations, returned_session_id
         
     except ClientError as e:
         error_code = e.response['Error']['Code']
         error_message = e.response['Error']['Message']
-        return f"AWS Error ({error_code}): {error_message}", []
+        return f"AWS Error ({error_code}): {error_message}", [], session_id
     except Exception as e:
-        return f"Error querying knowledge base: {str(e)}", []
+        return f"Error querying knowledge base: {str(e)}", [], session_id
 
 # Main app
 def main():
@@ -537,16 +560,26 @@ def main():
         # Model selection
         st.subheader("Model Settings")
         model_options = {
+            "Claude Sonnet 4.5 ⭐ (Best)": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            "Claude Opus 4.1 (Most Powerful)": "us.anthropic.claude-opus-4-1-20250805-v1:0",
+            "Claude Sonnet 4": "us.anthropic.claude-sonnet-4-20250514-v1:0",
+            "Claude Haiku 4.5 (Fastest)": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+            "Claude 3 Opus": "us.anthropic.claude-3-opus-20240229-v1:0",
             "Claude 3.5 Sonnet v2": "us.anthropic.claude-3-5-sonnet-20241022-v2:0",
             "Claude 3.5 Sonnet v1": "us.anthropic.claude-3-5-sonnet-20240620-v1:0",
             "Claude 3 Sonnet": "us.anthropic.claude-3-sonnet-20240229-v1:0",
             "Claude 3 Haiku": "us.anthropic.claude-3-haiku-20240307-v1:0"
         }
         
+        # Set default based on mode
+        default_model = "Claude Sonnet 4.5 ⭐ (Best)" if st.session_state.mode == "cba" else "Claude Haiku 4.5 (Fastest)"
+        default_index = list(model_options.keys()).index(default_model)
+        
         model_display = st.selectbox(
             "🤖 Claude Model",
             list(model_options.keys()),
-            help="Select the Claude model to use"
+            index=default_index,
+            help="Select the Claude model to use. Claude 4 models offer the best performance!"
         )
         
         model_arn = model_options[model_display]
@@ -584,10 +617,27 @@ def main():
         
         st.markdown("---")
         
+        st.markdown("### 🤖 Model Guide")
+        st.markdown("""
+        **Claude 4 Models (Newest!):**
+        - **Sonnet 4.5** ⭐ - Best overall
+        - **Opus 4.1** - Most powerful
+        - **Haiku 4.5** - Fastest & cheap
+        
+        **When to use what:**
+        - Complex questions → Sonnet 4.5
+        - Simple lookups → Haiku 4.5
+        - Edge cases → Opus 4.1
+        """)
+        
+        st.markdown("---")
+        
         col1, col2 = st.columns(2)
         with col1:
             if st.button("🗑️ Clear", use_container_width=True):
                 st.session_state.messages = []
+                # Reset session ID for current mode to start fresh conversation
+                st.session_state.session_ids[st.session_state.mode] = None
                 st.rerun()
         with col2:
             if st.button("🔄 Refresh", use_container_width=True):
@@ -684,12 +734,20 @@ def main():
         # Get response from knowledge base
         with st.chat_message("assistant"):
             with st.spinner(f"{theme['icon']} Searching..."):
-                response, citations = query_knowledge_base(
+                # Get the current session ID for this mode
+                current_session_id = st.session_state.session_ids.get(st.session_state.mode)
+                
+                # Query with conversation memory
+                response, citations, new_session_id = query_knowledge_base(
                     prompt, 
                     kb_id, 
                     model_arn, 
-                    st.session_state.mode
+                    st.session_state.mode,
+                    session_id=current_session_id
                 )
+                
+                # Store the session ID for future queries in this mode
+                st.session_state.session_ids[st.session_state.mode] = new_session_id
             
             st.markdown(response)
             
