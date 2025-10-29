@@ -515,16 +515,16 @@ Answer:"""
         error_code = e.response['Error']['Code']
         error_message = e.response['Error']['Message']
         
-        # Handle expired/invalid session - retry with new session
+        # Handle expired/invalid session - retry WITHOUT session ID to start fresh
         if error_code == 'ValidationException' and 'Session' in error_message and 'not valid' in error_message:
             try:
-                # Generate a new session ID and retry
-                new_session_id = str(uuid.uuid4())
-                request_params['sessionId'] = new_session_id
+                # Remove the old session ID and let AWS create a new one
+                if 'sessionId' in request_params:
+                    del request_params['sessionId']
                 
-                # Retry the request with new session
+                # Retry the request - AWS will create a new session automatically
                 response = client.retrieve_and_generate(**request_params)
-                returned_session_id = response.get('sessionId', new_session_id)
+                returned_session_id = response.get('sessionId', None)
                 generated_text = response['output']['text']
                 
                 # Extract citations
