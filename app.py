@@ -510,7 +510,6 @@ Answer:"""
                         citation_data = {
                             'content': content,
                             'uri': s3_location.get('uri', 'Unknown source'),
-                            'score': ref.get('metadata', {}).get('score', 0),
                             'metadata': ref.get('metadata', {})
                         }
                         citations.append(citation_data)
@@ -546,7 +545,6 @@ Answer:"""
                                 citation_data = {
                                     'content': content,
                                     'uri': s3_location.get('uri', 'Unknown source'),
-                                    'score': ref.get('metadata', {}).get('score', 0),
                                     'metadata': ref.get('metadata', {})
                                 }
                                 citations.append(citation_data)
@@ -580,7 +578,6 @@ Answer:"""
                                 citation_data = {
                                     'content': content,
                                     'uri': s3_location.get('uri', 'Unknown source'),
-                                    'score': ref.get('metadata', {}).get('score', 0),
                                     'metadata': ref.get('metadata', {})
                                 }
                                 citations.append(citation_data)
@@ -649,7 +646,7 @@ def main():
         }
         
         # Set default based on mode
-        default_model = "Claude Sonnet 4.5 ⭐ (Best)"
+        default_model = "Claude Sonnet 4.5 ⭐ (Best)" 
         default_index = list(model_options.keys()).index(default_model)
         
         model_display = st.selectbox(
@@ -791,10 +788,8 @@ def main():
                         if rule_location:
                             st.markdown(f'<div class="rule-location">📍 {rule_location}</div>', unsafe_allow_html=True)
                         
-                        # Show relevance score if available
-                        if 'score' in citation:
-                            score_pct = citation['score'] * 100
-                            st.markdown(f'<span class="relevance-badge">Relevance: {score_pct:.1f}%</span>', unsafe_allow_html=True)
+                        # Note: retrieve_and_generate API doesn't return relevance scores
+                        # If you need scores, use the retrieve API separately
                         
                         # Show preview
                         preview = content[:200] + "..." if len(content) > 200 else content
