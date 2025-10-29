@@ -649,7 +649,7 @@ def main():
         }
         
         # Set default based on mode
-        default_model = "Claude Sonnet 4.5 ⭐ (Best)" if st.session_state.mode == "cba" else "Claude Haiku 4.5 (Fastest)"
+        default_model = "Claude Sonnet 4.5 ⭐ (Best)"
         default_index = list(model_options.keys()).index(default_model)
         
         model_display = st.selectbox(
