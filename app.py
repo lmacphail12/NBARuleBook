@@ -646,7 +646,7 @@ def main():
         }
         
         # Set default based on mode
-        default_model = "Claude Sonnet 4.5 ⭐ (Best)" 
+        default_model = "Claude Sonnet 4.5 ⭐ (Best)" if st.session_state.mode == "cba" else "Claude Haiku 4.5 (Fastest)"
         default_index = list(model_options.keys()).index(default_model)
         
         model_display = st.selectbox(
@@ -761,7 +761,9 @@ def main():
     else:
         for message in st.session_state.messages:
             with st.chat_message(message["role"]):
-                st.markdown(message["content"])
+                # Escape dollar signs to prevent LaTeX rendering
+                content_display = message["content"].replace('$', r'\$')
+                st.markdown(content_display)
                 
                 # Display citations if available
                 if message["role"] == "assistant" and "citations" in message and message["citations"]:
@@ -793,17 +795,21 @@ def main():
                         
                         # Show preview
                         preview = content[:200] + "..." if len(content) > 200 else content
+                        # Escape dollar signs for HTML display
+                        preview_display = preview.replace('$', r'\$')
                         
                         st.markdown(f"""
                         <div class="source-excerpt">
-                            {preview}
+                            {preview_display}
                         </div>
                         """, unsafe_allow_html=True)
                         
                         # Add expander for full text if content is long
                         if len(content) > 200:
                             with st.expander("📖 Read full excerpt"):
-                                st.markdown(f"_{content}_")
+                                # Escape dollar signs for markdown display
+                                content_display = content.replace('$', r'\$')
+                                st.markdown(f"_{content_display}_")
                         
                         st.markdown("")  # Spacing
     
@@ -816,7 +822,8 @@ def main():
         
         # Display user message
         with st.chat_message("user"):
-            st.markdown(prompt)
+            prompt_display = prompt.replace('$', r'\$')
+            st.markdown(prompt_display)
         
         # Get response from knowledge base
         with st.chat_message("assistant"):
@@ -836,7 +843,9 @@ def main():
                 # Store the session ID for future queries in this mode
                 st.session_state.session_ids[st.session_state.mode] = new_session_id
             
-            st.markdown(response)
+            # Escape dollar signs to prevent LaTeX rendering issues
+            response_display = response.replace('$', r'\$')
+            st.markdown(response_display)
             
             # Display citations
             if citations:
@@ -861,21 +870,24 @@ def main():
                     if rule_location:
                         st.markdown(f'<div class="rule-location">📍 {rule_location}</div>', unsafe_allow_html=True)
                     
-                    if 'score' in citation:
-                        score_pct = citation['score'] * 100
-                        st.markdown(f'<span class="relevance-badge">Relevance: {score_pct:.1f}%</span>', unsafe_allow_html=True)
+                    # Note: retrieve_and_generate API doesn't return relevance scores
+                    # If you need scores, use the retrieve API separately
                     
                     preview = content[:200] + "..." if len(content) > 200 else content
+                    # Escape dollar signs for HTML display
+                    preview_display = preview.replace('$', r'\$')
                     
                     st.markdown(f"""
                     <div class="source-excerpt">
-                        {preview}
+                        {preview_display}
                     </div>
                     """, unsafe_allow_html=True)
                     
                     if len(content) > 200:
                         with st.expander("📖 Read full excerpt"):
-                            st.markdown(f"_{content}_")
+                            # Escape dollar signs for markdown display
+                            content_display = content.replace('$', r'\$')
+                            st.markdown(f"_{content_display}_")
                     
                     st.markdown("")
         
