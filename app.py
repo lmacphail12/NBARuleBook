@@ -209,7 +209,7 @@ st.markdown(f"""
         }}
     }}
     
-    /* Tablet optimization */
+    /* Tablet optimization (iPad) */
     @media only screen and (min-width: 769px) and (max-width: 1024px) {{
         .main {{
             padding: 1.5rem !important;
@@ -222,6 +222,83 @@ st.markdown(f"""
         .subtitle {{
             color: {theme['primary_color']} !important;
         }}
+        
+        /* Chat message text - iPad readability fix */
+        .stChatMessage p,
+        .stChatMessage div,
+        .stChatMessage span,
+        .stChatMessage {{
+            color: #1A1A1A !important;
+            -webkit-text-fill-color: #1A1A1A !important;
+        }}
+        
+        /* Chat input styling for iPad */
+        .stChatInputContainer textarea,
+        .stChatInputContainer input,
+        [data-testid="stChatInput"] textarea,
+        [data-testid="stChatInput"] input {{
+            color: #1A1A1A !important;
+            -webkit-text-fill-color: #1A1A1A !important;
+            background-color: white !important;
+            font-size: 1rem !important;
+            opacity: 1 !important;
+        }}
+        
+        .stChatInputContainer textarea::placeholder,
+        .stChatInputContainer input::placeholder,
+        [data-testid="stChatInput"] textarea::placeholder,
+        [data-testid="stChatInput"] input::placeholder {{
+            color: #666666 !important;
+            -webkit-text-fill-color: #666666 !important;
+            opacity: 1 !important;
+        }}
+        
+        /* Source excerpts iPad fix */
+        .source-excerpt {{
+            color: #1A1A1A !important;
+            -webkit-text-fill-color: #1A1A1A !important;
+        }}
+        
+        /* General text readability */
+        .stMarkdown,
+        .stMarkdown p,
+        .stMarkdown span {{
+            color: #1A1A1A !important;
+            -webkit-text-fill-color: #1A1A1A !important;
+        }}
+    }}
+    
+    /* iPad Pro and larger tablets */
+    @media only screen and (min-width: 1025px) and (max-width: 1366px) {{
+        /* Chat message text */
+        .stChatMessage p,
+        .stChatMessage div,
+        .stChatMessage span {{
+            color: #1A1A1A !important;
+            -webkit-text-fill-color: #1A1A1A !important;
+        }}
+        
+        /* Chat input styling */
+        .stChatInputContainer textarea,
+        .stChatInputContainer input,
+        [data-testid="stChatInput"] textarea,
+        [data-testid="stChatInput"] input {{
+            color: #1A1A1A !important;
+            -webkit-text-fill-color: #1A1A1A !important;
+            background-color: white !important;
+        }}
+        
+        .stChatInputContainer textarea::placeholder,
+        .stChatInputContainer input::placeholder {{
+            color: #666666 !important;
+            -webkit-text-fill-color: #666666 !important;
+            opacity: 1 !important;
+        }}
+        
+        .source-excerpt {{
+            color: #1A1A1A !important;
+            -webkit-text-fill-color: #1A1A1A !important;
+        }}
     }}
     
     /* Main app styling */
@@ -229,6 +306,51 @@ st.markdown(f"""
         padding: 2rem;
         background: linear-gradient(to bottom, #f5f5f5 0%, #ffffff 100%);
         max-width: 100%;
+    }}
+    
+    /* Global text color fix for iOS/Safari */
+    .stChatMessage p,
+    .stChatMessage div,
+    .stChatMessage span,
+    .stChatMessage li,
+    .stChatMessage {{
+        color: #1A1A1A !important;
+        -webkit-text-fill-color: #1A1A1A !important;
+    }}
+    
+    /* Global chat input styling - iOS Safari fix */
+    .stChatInputContainer textarea,
+    .stChatInputContainer input,
+    [data-testid="stChatInput"] textarea,
+    [data-testid="stChatInput"] input,
+    [data-baseweb="textarea"] textarea,
+    [data-baseweb="input"] input {{
+        color: #1A1A1A !important;
+        -webkit-text-fill-color: #1A1A1A !important;
+        background-color: white !important;
+        opacity: 1 !important;
+        -webkit-opacity: 1 !important;
+    }}
+    
+    /* Placeholder text styling */
+    .stChatInputContainer textarea::placeholder,
+    .stChatInputContainer input::placeholder,
+    [data-testid="stChatInput"] textarea::placeholder,
+    [data-testid="stChatInput"] input::placeholder,
+    textarea::placeholder,
+    input::placeholder {{
+        color: #666666 !important;
+        -webkit-text-fill-color: #666666 !important;
+        opacity: 1 !important;
+    }}
+    
+    /* Global markdown text fix */
+    .stMarkdown,
+    .stMarkdown p,
+    .stMarkdown span,
+    .stMarkdown li {{
+        color: #1A1A1A !important;
+        -webkit-text-fill-color: #1A1A1A !important;
     }}
     
     /* Chat messages */
@@ -264,7 +386,8 @@ st.markdown(f"""
         border-radius: 8px;
         margin: 0.5rem 0;
         border-left: 3px solid {theme['primary_color']};
-        color: #2c3e50;
+        color: #2c3e50 !important;
+        -webkit-text-fill-color: #2c3e50 !important;
         font-size: 0.95rem;
         line-height: 1.6;
         box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
