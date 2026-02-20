@@ -741,62 +741,116 @@ QUIZ_TOPICS = {
     "cba":      ["Salary Cap", "Free Agency", "Trade Rules", "Contract Types", "Luxury Tax", "Waivers & Buyouts"],
 }
 
+# Sub-queries used to diversify retrieval per topic — each call picks one at random
+_TOPIC_SUB_QUERIES = {
+    # Rulebook
+    "General Rules":      ["court dimensions and markings","jump ball and possession rules","number of players substitution rules","timing rules periods overtime","ball specifications and equipment"],
+    "Fouls & Violations": ["personal foul definition and penalty","technical foul assessment rules","flagrant foul classification","loose ball foul away from play","clear path foul criteria"],
+    "Shot Clock":         ["shot clock reset rules","shot clock violation penalty","shot clock off the rim rules","24 second clock operator duties","shot clock malfunction procedure"],
+    "Out of Bounds":      ["ball out of bounds last touched","player out of bounds ruling","throw-in location after violation","baseline out of bounds after made basket","out of bounds on the sideline"],
+    "Officials":          ["referee authority and jurisdiction","instant replay review triggers","official timeout procedures","correctable error rule","officials duties pregame"],
+    "Overtime":           ["overtime period length","overtime jump ball or possession","overtime timeout allocation","scoring tied end of overtime","multiple overtime periods rules"],
+    # CBA
+    "Salary Cap":         ["salary cap calculation methodology","exceptions to salary cap","team salary definition","cap holds and cap room","cap year definition and timing"],
+    "Free Agency":        ["unrestricted free agent eligibility","restricted free agent offer sheet","qualifying offer rules","early termination option","moratorium period free agency"],
+    "Trade Rules":        ["trade deadline date","aggregation rules trade","trade kickers salary","sign and trade rules","cash in trades limits"],
+    "Contract Types":     ["veteran minimum contract","two-way contract rules","exhibit 10 contract","two-way conversion rules","standard player contract provisions"],
+    "Luxury Tax":         ["luxury tax threshold calculation","luxury tax repeater penalty","luxury tax distribution","apron rules hard cap","taxpayer mid-level exception"],
+    "Waivers & Buyouts":  ["waiver claim priority order","stretch provision buyout","waiver wire process","buyout agreement timing","partial guarantee waiver"],
+}
+
+# Question-type rotator — forces Claude to ask different kinds of questions
+_QUESTION_TYPES = [
+    "a specific number, time limit, or threshold (e.g. 'how many seconds', 'what is the penalty amount')",
+    "a scenario ruling (e.g. 'what happens when…', 'if a player does X then…')",
+    "an exception or special case to the general rule",
+    "the definition of a specific term used in the rules",
+    "who is responsible for a specific action or call (player, official, team, etc.)",
+    "the correct sequence or order of events in a specific situation",
+]
+
+import random as _random
+
 def generate_quiz_question(mode: str, topic: str, kb_id: str):
     """
-    Generate a grounded multiple-choice quiz question.
-    Step 1: retrieve relevant chunks from the KB for the topic.
-    Step 2: pass those chunks to Claude directly so the question and answer
-            are based on the actual source documents, not training-data guesses.
+    Generate a grounded, varied multiple-choice quiz question.
+    - Randomises the retrieval sub-query so different source chunks are fetched each call.
+    - Retrieves a larger pool (10 results) then randomly samples 4 to force variety.
+    - Rotates question type so consecutive questions feel different.
+    - Passes previously asked questions to Claude so it avoids repeating them.
     """
     rag_client     = get_bedrock_client()
     runtime_client = get_bedrock_runtime_client()
     if not rag_client or not runtime_client:
         return "Error: Could not initialise Bedrock clients.", [], None
 
-    domain = "NBA rulebook" if mode == "rulebook" else "NBA CBA / salary cap rules"
+    domain = "NBA official rulebook" if mode == "rulebook" else "NBA Collective Bargaining Agreement and salary cap rules"
 
-    # ── Step 1: retrieve relevant source chunks ──────────────────────────────
+    # ── Pick a random sub-query for this topic ───────────────────────────────
+    sub_queries = _TOPIC_SUB_QUERIES.get(topic, [topic])
+    retrieval_query = _random.choice(sub_queries)
+
+    # ── Step 1: retrieve a larger pool then randomly sample ──────────────────
     try:
         retrieval_resp = rag_client.retrieve(
             knowledgeBaseId=kb_id,
-            retrievalQuery={"text": topic},
-            retrievalConfiguration={"vectorSearchConfiguration": {"numberOfResults": 5}},
+            retrievalQuery={"text": retrieval_query},
+            retrievalConfiguration={"vectorSearchConfiguration": {"numberOfResults": 10}},
         )
-        raw_chunks = retrieval_resp.get("retrievalResults", [])
-        source_text = "\n\n---\n\n".join(
-            r.get("content", {}).get("text", "") for r in raw_chunks if r.get("content", {}).get("text")
-        )
-    except Exception as e:
-        source_text = ""  # Degrade gracefully — still try to generate
+        all_chunks = [
+            r.get("content", {}).get("text", "")
+            for r in retrieval_resp.get("retrievalResults", [])
+            if r.get("content", {}).get("text", "").strip()
+        ]
+        # Randomly sample up to 4 chunks so the source material varies each call
+        sampled = _random.sample(all_chunks, min(4, len(all_chunks))) if all_chunks else []
+        source_text = "\n\n---\n\n".join(sampled)
+    except Exception:
+        source_text = ""
+
+    # ── Pick a random question type ──────────────────────────────────────────
+    q_type = _random.choice(_QUESTION_TYPES)
+
+    # ── Build the "avoid repeating" block from session history ───────────────
+    asked_key   = f"quiz_asked_{mode}_{topic}"
+    asked_so_far = st.session_state.get(asked_key, [])
+    avoid_block  = ""
+    if asked_so_far:
+        bullets = "\n".join(f"  - {q}" for q in asked_so_far[-8:])
+        avoid_block = f"""
+IMPORTANT — do NOT ask any of these questions that have already been asked:
+{bullets}
+
+Your question MUST cover a different specific rule, number, scenario, or term.
+"""
 
     # ── Step 2: generate question grounded in retrieved text ─────────────────
-    if source_text:
-        context_block = f"""Use ONLY the following source excerpts from the {domain} to write the question.
-Do not use any information outside these excerpts.
+    context_block = (
+        f"Use ONLY the following source excerpts from the {domain}.\n"
+        f"Do not use information outside these excerpts.\n\n"
+        f"SOURCE EXCERPTS:\n{source_text}\n\n"
+        if source_text
+        else f"Use your knowledge of the {domain}.\n\n"
+    )
 
-SOURCE EXCERPTS:
-{source_text}
+    quiz_prompt = f"""{context_block}Generate one multiple-choice quiz question about: {topic}.
 
-"""
-    else:
-        context_block = f"Use your knowledge of the {domain} to write the question.\n\n"
+The question must be specifically about {q_type}.
+{avoid_block}
+Requirements:
+- The correct answer MUST be directly supported by the source text above.
+- The three wrong answers must be plausible but clearly incorrect per the sources.
+- No trick questions or ambiguous wording.
+- Focus on a concrete, specific fact — not a vague conceptual question.
 
-    quiz_prompt = f"""{context_block}Generate one challenging but fair multiple-choice quiz question
-specifically on the topic of: {topic}.
-
-Rules:
-- The correct answer MUST be directly supported by the source excerpts above.
-- Wrong answers should be plausible but clearly incorrect based on the sources.
-- Do not include trick questions or ambiguous wording.
-
-Reply in EXACTLY this format (no extra text, no preamble, no markdown):
+Reply in EXACTLY this format (no extra text, no markdown, no preamble):
 QUESTION: [question text]
 A) [option]
 B) [option]
 C) [option]
 D) [option]
 ANSWER: [A, B, C, or D]
-EXPLANATION: [one or two sentences quoting or paraphrasing the specific rule/article that proves the answer]"""
+EXPLANATION: [one or two sentences citing the specific rule, article, or section that proves the answer]"""
 
     try:
         response = runtime_client.invoke_model(
@@ -805,12 +859,22 @@ EXPLANATION: [one or two sentences quoting or paraphrasing the specific rule/art
             accept="application/json",
             body=json.dumps({
                 "anthropic_version": "bedrock-2023-05-31",
-                "max_tokens": 600,
+                "max_tokens": 700,
                 "messages": [{"role": "user", "content": quiz_prompt}],
             }),
         )
         result = json.loads(response["body"].read())
-        text = result.get("content", [{}])[0].get("text", "")
+        text   = result.get("content", [{}])[0].get("text", "")
+
+        # Store the question text in session history to avoid repeats
+        parsed_check = text.split("QUESTION:")
+        if len(parsed_check) > 1:
+            q_text = parsed_check[1].split("\n")[0].strip()
+            if q_text:
+                if asked_key not in st.session_state:
+                    st.session_state[asked_key] = []
+                st.session_state[asked_key].append(q_text)
+
         return text, [], None
     except Exception as e:
         return f"Error generating quiz: {e}", [], None
