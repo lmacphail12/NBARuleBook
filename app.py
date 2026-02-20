@@ -408,13 +408,20 @@ def render_citations(citations: list, mode: str):
     if not citations:
         return
 
-    # ── Deduplicate by URI ──
+    # ── Deduplicate by content fingerprint (URI alone can vary per chunk suffix) ──
     seen, unique = set(), []
     for c in citations:
-        uri = c.get("uri", "")
-        if uri not in seen:
-            seen.add(uri)
+        # Use first 120 chars of content as fingerprint — catches same text cited twice
+        fingerprint = c.get("content", "")[:120].strip()
+        if fingerprint and fingerprint not in seen:
+            seen.add(fingerprint)
             unique.append(c)
+        elif not fingerprint:
+            # Fallback to URI if content is empty
+            uri = c.get("uri", "")
+            if uri not in seen:
+                seen.add(uri)
+                unique.append(c)
 
     # ── Confidence indicator ──
     conf_label, conf_color = get_confidence(unique)
@@ -500,11 +507,18 @@ Use the rulebook sources provided to answer the following question.
 Question: {question}
 
 Instructions:
-1. Combine multiple rules when needed – identify each relevant rule first.
-2. For scenario / "what if" questions, reason step-by-step.
-3. Always cite specific rules (e.g., "According to Rule 12, Section II…").
-4. Be confident in logical inferences that follow from the stated rules.
-5. Reference prior conversation context when answering follow-ups.
+1. ALWAYS synthesize an answer — even if no single rule directly addresses the question,
+   combine definitions, examples, and related sections to construct a clear response.
+   Never say the rulebook "does not directly address" something if related sections exist.
+2. For questions comparing two concepts (e.g., fouls vs. violations), find the definitions
+   and examples of each in the sources and explain the distinction clearly.
+3. Combine multiple rules when needed — identify each relevant rule first, then explain
+   how they connect.
+4. For scenario / "what if" questions, reason step-by-step through the applicable rules.
+5. Always cite specific rules (e.g., "According to Rule 12, Section II…").
+6. Be confident in logical inferences — if the answer logically follows from the rules
+   provided, state it as the answer.
+7. Reference prior conversation context when answering follow-ups.
 
 Answer:"""
     else:
@@ -574,33 +588,71 @@ QUIZ_TOPICS = {
     "cba":      ["Salary Cap", "Free Agency", "Trade Rules", "Contract Types", "Luxury Tax", "Waivers & Buyouts"],
 }
 
-def generate_quiz_question(mode: str, topic: str):
-    """Generate a multiple-choice quiz question via direct Claude invocation (no RAG)."""
-    domain = "NBA official rulebook" if mode == "rulebook" else "NBA Collective Bargaining Agreement (CBA) and salary cap rules"
-    quiz_prompt = f"""Generate a challenging but fair multiple-choice quiz question about the {domain},
+def generate_quiz_question(mode: str, topic: str, kb_id: str):
+    """
+    Generate a grounded multiple-choice quiz question.
+    Step 1: retrieve relevant chunks from the KB for the topic.
+    Step 2: pass those chunks to Claude directly so the question and answer
+            are based on the actual source documents, not training-data guesses.
+    """
+    rag_client     = get_bedrock_client()
+    runtime_client = get_bedrock_runtime_client()
+    if not rag_client or not runtime_client:
+        return "Error: Could not initialise Bedrock clients.", [], None
+
+    domain = "NBA rulebook" if mode == "rulebook" else "NBA CBA / salary cap rules"
+
+    # ── Step 1: retrieve relevant source chunks ──────────────────────────────
+    try:
+        retrieval_resp = rag_client.retrieve(
+            knowledgeBaseId=kb_id,
+            retrievalQuery={"text": topic},
+            retrievalConfiguration={"vectorSearchConfiguration": {"numberOfResults": 5}},
+        )
+        raw_chunks = retrieval_resp.get("retrievalResults", [])
+        source_text = "\n\n---\n\n".join(
+            r.get("content", {}).get("text", "") for r in raw_chunks if r.get("content", {}).get("text")
+        )
+    except Exception as e:
+        source_text = ""  # Degrade gracefully — still try to generate
+
+    # ── Step 2: generate question grounded in retrieved text ─────────────────
+    if source_text:
+        context_block = f"""Use ONLY the following source excerpts from the {domain} to write the question.
+Do not use any information outside these excerpts.
+
+SOURCE EXCERPTS:
+{source_text}
+
+"""
+    else:
+        context_block = f"Use your knowledge of the {domain} to write the question.\n\n"
+
+    quiz_prompt = f"""{context_block}Generate one challenging but fair multiple-choice quiz question
 specifically on the topic of: {topic}.
 
-Reply in EXACTLY this format (no extra text, no preamble):
+Rules:
+- The correct answer MUST be directly supported by the source excerpts above.
+- Wrong answers should be plausible but clearly incorrect based on the sources.
+- Do not include trick questions or ambiguous wording.
+
+Reply in EXACTLY this format (no extra text, no preamble, no markdown):
 QUESTION: [question text]
 A) [option]
 B) [option]
 C) [option]
 D) [option]
 ANSWER: [A, B, C, or D]
-EXPLANATION: [one or two sentences citing the specific rule or CBA article]"""
-
-    client = get_bedrock_runtime_client()
-    if not client:
-        return "Error: Could not initialise Bedrock runtime client.", [], None
+EXPLANATION: [one or two sentences quoting or paraphrasing the specific rule/article that proves the answer]"""
 
     try:
-        response = client.invoke_model(
+        response = runtime_client.invoke_model(
             modelId="us.anthropic.claude-haiku-4-5-20251001-v1:0",
             contentType="application/json",
             accept="application/json",
             body=json.dumps({
                 "anthropic_version": "bedrock-2023-05-31",
-                "max_tokens": 512,
+                "max_tokens": 600,
                 "messages": [{"role": "user", "content": quiz_prompt}],
             }),
         )
@@ -780,7 +832,7 @@ def main():
             st.session_state.quiz_raw         = None
             st.session_state.show_quiz_answer = False
             with st.spinner("Generating quiz question…"):
-                raw_resp, _, _ = generate_quiz_question(st.session_state.mode, topic)
+                raw_resp, _, _ = generate_quiz_question(st.session_state.mode, topic, kb_id)
                 parsed = parse_quiz(raw_resp)
                 if parsed:
                     st.session_state.current_quiz = parsed
