@@ -327,6 +327,73 @@ textarea::placeholder, input::placeholder {{
     opacity: 1 !important;
 }}
 
+/* ── Loading animation ─────────────────── */
+@keyframes bounce {{
+    0%, 80%, 100% {{ transform: translateY(0) rotate(0deg); }}
+    40%            {{ transform: translateY(-18px) rotate(20deg); }}
+    60%            {{ transform: translateY(-8px) rotate(-10deg); }}
+}}
+@keyframes pulse-ring {{
+    0%   {{ transform: scale(0.8); opacity: 0.6; }}
+    50%  {{ transform: scale(1.1); opacity: 0.2; }}
+    100% {{ transform: scale(0.8); opacity: 0.6; }}
+}}
+@keyframes fade-dots {{
+    0%,20%  {{ opacity: 0; }}
+    50%      {{ opacity: 1; }}
+    80%,100% {{ opacity: 0; }}
+}}
+.loading-card {{
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 2rem 1rem;
+    border-radius: 12px;
+    background: {surface};
+    border: 1px solid {p}44;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.12);
+    margin: 0.5rem 0;
+    text-align: center;
+}}
+.loading-ball {{
+    font-size: 3rem;
+    animation: bounce 1.2s ease-in-out infinite;
+    display: inline-block;
+    margin-bottom: 0.5rem;
+    filter: drop-shadow(0 6px 8px rgba(0,0,0,0.25));
+}}
+.loading-ring {{
+    width: 60px;
+    height: 8px;
+    background: {p}44;
+    border-radius: 50%;
+    animation: pulse-ring 1.2s ease-in-out infinite;
+    margin: 0 auto 1.2rem auto;
+}}
+.loading-label {{
+    font-size: 1.05rem;
+    font-weight: 600;
+    color: {p} !important;
+    -webkit-text-fill-color: {p} !important;
+    margin-bottom: 0.4rem;
+}}
+.loading-sub {{
+    font-size: 0.82rem;
+    color: #888 !important;
+    -webkit-text-fill-color: #888 !important;
+}}
+.loading-dots span {{
+    display: inline-block;
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: {p};
+    margin: 0 3px;
+    animation: fade-dots 1.4s ease-in-out infinite;
+}}
+.loading-dots span:nth-child(2) {{ animation-delay: 0.2s; }}
+.loading-dots span:nth-child(3) {{ animation-delay: 0.4s; }}
+
 /* ── Stray Streamlit chrome ────────────── */
 footer {{ display: none !important; }}
 
@@ -1082,24 +1149,37 @@ def main():
             st.markdown(prompt.replace("$", r"\$"))
             st.markdown(f'<div class="msg-ts">🕐 {ts}</div>', unsafe_allow_html=True)
 
-        # ── Visible status bar while the model runs ──────────────────────────────
-        status_label = (
-            "🏀 Searching the NBA Rulebook…"
+        # ── Animated loading card inside the assistant bubble ────────────────────
+        loading_icon  = "🏀" if st.session_state.mode == "rulebook" else "💰"
+        loading_label = (
+            "Searching the NBA Rulebook…"
             if st.session_state.mode == "rulebook"
-            else "💰 Searching the CBA & Salary Cap docs…"
+            else "Searching the CBA & Salary Cap docs…"
         )
-        with st.status(status_label, expanded=True) as status:
-            st.write("Retrieving relevant sections…")
+        loading_html = f"""
+<div class="loading-card">
+    <div class="loading-ball">{loading_icon}</div>
+    <div class="loading-ring"></div>
+    <div class="loading-label">{loading_label}</div>
+    <div class="loading-sub">Retrieving relevant sections and generating your answer</div>
+    <div class="loading-dots" style="margin-top:0.8rem;">
+        <span></span><span></span><span></span>
+    </div>
+</div>"""
+
+        with st.chat_message("assistant"):
+            loading_placeholder = st.empty()
+            loading_placeholder.markdown(loading_html, unsafe_allow_html=True)
+
             cur_session = st.session_state.session_ids.get(st.session_state.mode)
             response, citations, new_session = query_knowledge_base(
                 prompt, kb_id, model_arn, st.session_state.mode, session_id=cur_session
             )
             st.session_state.session_ids[st.session_state.mode] = new_session
-            src_count = len(citations)
-            st.write(f"Generating answer from {src_count} source{'s' if src_count != 1 else ''}…")
-            status.update(label="✅ Done!", state="complete", expanded=False)
 
-        with st.chat_message("assistant"):
+            # Swap loading card for the actual response
+            loading_placeholder.empty()
+
             resp_ts = datetime.now().strftime("%b %d, %I:%M %p")
             st.markdown(response.replace("$", r"\$"))
             st.markdown(f'<div class="msg-ts">🕐 {resp_ts}</div>', unsafe_allow_html=True)
