@@ -2,23 +2,29 @@ import streamlit as st
 import boto3
 import json
 import uuid
+import re
+from datetime import datetime
 from botocore.exceptions import ClientError
 
-# Page configuration
+# ─────────────────────────────────────────────
+# PAGE CONFIG
+# ─────────────────────────────────────────────
 st.set_page_config(
     page_title="NBA Assistant - Rulebook & CBA",
     page_icon="🏀",
     layout="wide",
-    initial_sidebar_state="collapsed" 
+    initial_sidebar_state="expanded"
 )
 
-# Theme configurations
+# ─────────────────────────────────────────────
+# THEME CONFIG
+# ─────────────────────────────────────────────
 THEMES = {
     "rulebook": {
         "name": "🏀 NBA Rulebook",
         "kb_id": "JFEGBVQF3O",
-        "primary_color": "#F58426",  # Orange
-        "secondary_color": "#1A1A1A",  # Black
+        "primary_color": "#F58426",
+        "secondary_color": "#1A1A1A",
         "gradient_start": "#F58426",
         "gradient_end": "#FF6B35",
         "title": "🏀 NBA Rulebook Chatbot",
@@ -28,14 +34,14 @@ THEMES = {
             "What constitutes a traveling violation?",
             "How long is a shot clock in the NBA?",
             "What are the rules for goaltending?",
-            "What's the difference between a foul and a violation?"
-        ]
+            "What's the difference between a foul and a violation?",
+        ],
     },
     "cba": {
         "name": "💰 CBA & Salary Cap",
         "kb_id": "B902HDGE8W",
-        "primary_color": "#2E7D32",  # Money Green
-        "secondary_color": "#FFD700",  # Gold
+        "primary_color": "#2E7D32",
+        "secondary_color": "#FFD700",
         "gradient_start": "#2E7D32",
         "gradient_end": "#4CAF50",
         "title": "💰 NBA CBA & Salary Cap Assistant",
@@ -45,981 +51,935 @@ THEMES = {
             "What's a restricted free agent?",
             "What rules are there around team options?",
             "When can teams claim a waived player?",
-            "How does the salary cap work?"
-        ]
-    }
+            "How does the salary cap work?",
+        ],
+    },
 }
 
-# Initialize session state for mode
-if "mode" not in st.session_state:
-    st.session_state.mode = "rulebook"
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-# Initialize session IDs for conversation memory (one per mode)
-if "session_ids" not in st.session_state:
-    st.session_state.session_ids = {
-        "rulebook": None,
-        "cba": None
-    }
-# Track last used configuration to detect changes
-if "last_config" not in st.session_state:
-    st.session_state.last_config = {
-        "rulebook": {"model": None, "kb_id": None},
-        "cba": {"model": None, "kb_id": None}
-    }
+# ─────────────────────────────────────────────
+# CBA SOURCE IDENTIFICATION
+# ─────────────────────────────────────────────
+CBA_SOURCE_PATTERNS = {
+    "cba": ["cba", "collective-bargaining", "collective_bargaining", "labor-agreement", "labor_agreement"],
+    "operations": ["operations", "ops-manual", "operations-manual", "basketball-operations", "ops_manual"],
+}
 
-# Get current theme
-theme = THEMES[st.session_state.mode]
+def identify_cba_source(uri: str):
+    """
+    Identify whether a CBA citation comes from the CBA document or the Operations Manual.
+    Returns (badge_label, css_class, display_name).
+    """
+    uri_lower = uri.lower()
+    filename = uri.split("/")[-1] if "/" in uri else uri
+    display_name = re.sub(r"[-_]", " ", filename.replace(".pdf", "")).title()
 
-# Dynamic CSS based on theme
-st.markdown(f"""
+    for source_type, patterns in CBA_SOURCE_PATTERNS.items():
+        if any(p in uri_lower for p in patterns):
+            if source_type == "cba":
+                return "📜 CBA Document", "source-cba", "CBA"
+            else:
+                return "📋 Operations Manual", "source-operations", "Operations Manual"
+
+    # Fallback: use the cleaned filename
+    return f"📄 {display_name}", "source-unknown", display_name
+
+
+# ─────────────────────────────────────────────
+# CROSS-MODE DETECTION
+# ─────────────────────────────────────────────
+CROSS_MODE_KEYWORDS = {
+    "rulebook_to_cba": [
+        "salary", "contract", "cap space", "waive", "waived", "suspension",
+        "suspended", "fine", "fined", "trade", "free agent", "buyout",
+        "incentive", "guaranteed", "minimum salary", "maximum salary",
+    ],
+    "cba_to_rulebook": [
+        "technical foul", "flagrant foul", "ejection", "ejected", "violation",
+        "traveling", "goaltending", "shot clock", "game clock", "referee",
+        "official", "out of bounds", "possession", "foul out",
+    ],
+}
+
+def detect_cross_mode(response_text: str, current_mode: str):
+    """Return the other mode name if cross-mode topics are detected, else None."""
+    text_lower = response_text.lower()
+    key = "rulebook_to_cba" if current_mode == "rulebook" else "cba_to_rulebook"
+    matches = [kw for kw in CROSS_MODE_KEYWORDS[key] if kw in text_lower]
+    if len(matches) >= 2:
+        return "cba" if current_mode == "rulebook" else "rulebook"
+    return None
+
+
+# ─────────────────────────────────────────────
+# CONFIDENCE LEVEL
+# ─────────────────────────────────────────────
+def get_confidence(citations: list):
+    """Return (label, hex_color) confidence indicator based on citation quality."""
+    if not citations:
+        return "⚠️ Low", "#FF9800"
+    with_meta = sum(1 for c in citations if c.get("metadata"))
+    if len(citations) >= 3 and with_meta >= 2:
+        return "✅ High", "#4CAF50"
+    elif len(citations) >= 2:
+        return "🟡 Medium", "#FFC107"
+    return "🟠 Low", "#FF9800"
+
+
+# ─────────────────────────────────────────────
+# SESSION STATE INIT
+# ─────────────────────────────────────────────
+def init_session_state():
+    defaults = {
+        "mode": "rulebook",
+        "messages": [],
+        "session_ids": {"rulebook": None, "cba": None},
+        "last_config": {
+            "rulebook": {"model": None, "kb_id": None},
+            "cba": {"model": None, "kb_id": None},
+        },
+        "dark_mode": False,
+        "pending_prompt": None,
+        "current_quiz": None,
+        "quiz_raw": None,
+        "show_quiz_answer": False,
+    }
+    for key, val in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = val
+
+init_session_state()
+
+
+# ─────────────────────────────────────────────
+# DYNAMIC CSS
+# ─────────────────────────────────────────────
+def build_css(theme: dict, dark: bool) -> str:
+    bg           = "#1A1A2E" if dark else "#f5f5f5"
+    surface      = "#16213E" if dark else "#ffffff"
+    text         = "#E0E0E0" if dark else "#1A1A1A"
+    sub_text     = "#aaaaaa" if dark else theme["primary_color"]
+    chat_bg      = "#0F3460" if dark else "#f8f9fa"
+    excerpt_bg   = "#1a2a3a" if dark else "linear-gradient(135deg,#FFF8F0 0%,#FFE4D1 100%)"
+    excerpt_text = "#E0E0E0" if dark else "#2c3e50"
+    p            = theme["primary_color"]
+    s            = theme["secondary_color"]
+
+    return f"""
 <style>
-    /* Mobile-first responsive design */
-    @media only screen and (max-width: 768px) {{
-        .main {{
-            padding: 1rem !important;
-            padding-bottom: 100px !important;
-        }}
-        
-        h1 {{
-            font-size: 1.5rem !important;
-            color: #1A1A1A !important;
-            font-weight: 700 !important;
-        }}
-        
-        .subtitle {{
-            font-size: 0.9rem !important;
-            color: {theme['primary_color']} !important;
-            font-weight: 600 !important;
-        }}
-        
-        /* Chat message text - CRITICAL for readability */
-        .stChatMessage p {{
-            color: #1A1A1A !important;
-            font-size: 1rem !important;
-        }}
-        
-        .stChatMessage div {{
-            color: #1A1A1A !important;
-        }}
-        
-        .stChatMessage {{
-            border-left: 4px solid {theme['primary_color']} !important;
-            background-color: #f8f9fa !important;
-        }}
-        
-        /* Source excerpts */
-        .source-excerpt {{
-            padding: 0.8rem 1rem !important;
-            font-size: 0.9rem !important;
-            color: #1A1A1A !important;
-            background: linear-gradient(135deg, #FFF8F0 0%, #FFE4D1 100%) !important;
-            border-left: 3px solid {theme['primary_color']} !important;
-        }}
-        
-        /* Rule/CBA location badges */
-        .rule-location {{
-            font-size: 0.75rem !important;
-            background: linear-gradient(135deg, {theme['secondary_color']} 0%, {theme['primary_color']} 100%) !important;
-            color: white !important;
-            border: 2px solid {theme['primary_color']} !important;
-        }}
-        
-        /* Relevance badges */
-        .relevance-badge {{
-            background: {theme['primary_color']} !important;
-            color: white !important;
-        }}
-        
-        /* Metric containers */
-        .metric-container {{
-            background: linear-gradient(135deg, {theme['gradient_start']} 0%, {theme['gradient_end']} 100%) !important;
-            color: white !important;
-        }}
-        
-        .metric-container h2 {{
-            color: white !important;
-        }}
-        
-        .metric-container p {{
-            color: white !important;
-        }}
-        
-        /* Main content text */
-        .main p {{
-            color: #1A1A1A !important;
-        }}
-        
-        /* Links */
-        a {{
-            color: {theme['primary_color']} !important;
-        }}
-        
-        /* Ensure all markdown text is readable */
-        .stMarkdown {{
-            color: #1A1A1A !important;
-        }}
-        
-        /* MOBILE SCROLLING FIXES */
-        footer {{
-            display: none !important;
-        }}
-        
-        .stBottom {{
-            background: transparent !important;
-        }}
-        
-        /* Chat input styling */
-        .stChatInputContainer {{
-            position: relative !important;
-            bottom: 0 !important;
-            margin-bottom: 1rem !important;
-            background: white !important;
-            padding: 0.5rem !important;
-            border-top: 1px solid #e0e0e0 !important;
-        }}
-        
-        .stChatInputContainer textarea {{
-            color: #1A1A1A !important;
-            font-size: 1rem !important;
-            background-color: white !important;
-        }}
-        
-        .stChatInputContainer input {{
-            color: #1A1A1A !important;
-            font-size: 1rem !important;
-            background-color: white !important;
-        }}
-        
-        .stChatInputContainer textarea::placeholder,
-        .stChatInputContainer input::placeholder {{
-            color: #666666 !important;
-            opacity: 0.7 !important;
-        }}
-        
-        .stChatInputContainer button {{
-            background-color: {theme['primary_color']} !important;
-            color: white !important;
-        }}
-        
-        /* Ensure scrolling works smoothly */
-        .main, .stApp {{
-            overflow-y: auto !important;
-            -webkit-overflow-scrolling: touch !important;
-        }}
-    }}
-    
-    /* Tablet optimization (iPad) */
-    @media only screen and (min-width: 769px) and (max-width: 1024px) {{
-        .main {{
-            padding: 1.5rem !important;
-        }}
-        
-        h1 {{
-            color: #1A1A1A !important;
-        }}
-        
-        .subtitle {{
-            color: {theme['primary_color']} !important;
-        }}
-        
-        /* Chat message text - iPad readability fix */
-        .stChatMessage p,
-        .stChatMessage div,
-        .stChatMessage span,
-        .stChatMessage {{
-            color: #1A1A1A !important;
-            -webkit-text-fill-color: #1A1A1A !important;
-        }}
-        
-        /* Chat input styling for iPad */
-        .stChatInputContainer textarea,
-        .stChatInputContainer input,
-        [data-testid="stChatInput"] textarea,
-        [data-testid="stChatInput"] input {{
-            color: #1A1A1A !important;
-            -webkit-text-fill-color: #1A1A1A !important;
-            background-color: white !important;
-            font-size: 1rem !important;
-            opacity: 1 !important;
-        }}
-        
-        .stChatInputContainer textarea::placeholder,
-        .stChatInputContainer input::placeholder,
-        [data-testid="stChatInput"] textarea::placeholder,
-        [data-testid="stChatInput"] input::placeholder {{
-            color: #666666 !important;
-            -webkit-text-fill-color: #666666 !important;
-            opacity: 1 !important;
-        }}
-        
-        /* Source excerpts iPad fix */
-        .source-excerpt {{
-            color: #1A1A1A !important;
-            -webkit-text-fill-color: #1A1A1A !important;
-        }}
-        
-        /* General text readability */
-        .stMarkdown,
-        .stMarkdown p,
-        .stMarkdown span {{
-            color: #1A1A1A !important;
-            -webkit-text-fill-color: #1A1A1A !important;
-        }}
-    }}
-    
-    /* iPad Pro and larger tablets */
-    @media only screen and (min-width: 1025px) and (max-width: 1366px) {{
-        /* Chat message text */
-        .stChatMessage p,
-        .stChatMessage div,
-        .stChatMessage span {{
-            color: #1A1A1A !important;
-            -webkit-text-fill-color: #1A1A1A !important;
-        }}
-        
-        /* Chat input styling */
-        .stChatInputContainer textarea,
-        .stChatInputContainer input,
-        [data-testid="stChatInput"] textarea,
-        [data-testid="stChatInput"] input {{
-            color: #1A1A1A !important;
-            -webkit-text-fill-color: #1A1A1A !important;
-            background-color: white !important;
-        }}
-        
-        .stChatInputContainer textarea::placeholder,
-        .stChatInputContainer input::placeholder {{
-            color: #666666 !important;
-            -webkit-text-fill-color: #666666 !important;
-            opacity: 1 !important;
-        }}
-        
-        .source-excerpt {{
-            color: #1A1A1A !important;
-            -webkit-text-fill-color: #1A1A1A !important;
-        }}
-    }}
-    
-    /* Main app styling */
-    .main {{
-        padding: 2rem;
-        background: linear-gradient(to bottom, #f5f5f5 0%, #ffffff 100%);
-        max-width: 100%;
-    }}
-    
-    /* Global text color fix for iOS/Safari */
-    .stChatMessage p,
-    .stChatMessage div,
-    .stChatMessage span,
-    .stChatMessage li,
-    .stChatMessage {{
-        color: #1A1A1A !important;
-        -webkit-text-fill-color: #1A1A1A !important;
-    }}
-    
-    /* Global chat input styling - iOS Safari fix */
-    .stChatInputContainer textarea,
-    .stChatInputContainer input,
-    [data-testid="stChatInput"] textarea,
-    [data-testid="stChatInput"] input,
-    [data-baseweb="textarea"] textarea,
-    [data-baseweb="input"] input {{
-        color: #1A1A1A !important;
-        -webkit-text-fill-color: #1A1A1A !important;
-        background-color: white !important;
-        opacity: 1 !important;
-        -webkit-opacity: 1 !important;
-    }}
-    
-    /* Placeholder text styling */
-    .stChatInputContainer textarea::placeholder,
-    .stChatInputContainer input::placeholder,
-    [data-testid="stChatInput"] textarea::placeholder,
-    [data-testid="stChatInput"] input::placeholder,
-    textarea::placeholder,
-    input::placeholder {{
-        color: #666666 !important;
-        -webkit-text-fill-color: #666666 !important;
-        opacity: 1 !important;
-    }}
-    
-    /* Global markdown text fix */
-    .stMarkdown,
-    .stMarkdown p,
-    .stMarkdown span,
-    .stMarkdown li {{
-        color: #1A1A1A !important;
-        -webkit-text-fill-color: #1A1A1A !important;
-    }}
-    
-    /* Chat messages */
-    .stChatMessage {{
-        background-color: #f8f9fa;
-        border-radius: 10px;
-        padding: 1rem;
-        margin-bottom: 1rem;
-        border-left: 4px solid {theme['primary_color']};
-        max-width: 100%;
-        word-wrap: break-word;
-    }}
-    
-    /* Location badges (rules or CBA sections) */
-    .rule-location {{
-        display: inline-block;
-        background: linear-gradient(135deg, {theme['secondary_color']} 0%, {theme['primary_color']} 100%);
-        color: white;
-        padding: 0.4rem 0.8rem;
-        border-radius: 6px;
-        font-size: 0.85rem;
-        font-weight: 700;
-        margin-bottom: 0.8rem;
-        border: 2px solid {theme['primary_color']};
-        text-transform: uppercase;
-        letter-spacing: 0.5px;
-    }}
-    
-    /* Source excerpt styling */
-    .source-excerpt {{
-        background: linear-gradient(135deg, #FFF8F0 0%, #FFE4D1 100%);
-        padding: 1rem 1.5rem;
-        border-radius: 8px;
-        margin: 0.5rem 0;
-        border-left: 3px solid {theme['primary_color']};
-        color: #2c3e50 !important;
-        -webkit-text-fill-color: #2c3e50 !important;
-        font-size: 0.95rem;
-        line-height: 1.6;
-        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
-        max-width: 100%;
-        word-wrap: break-word;
-        overflow-wrap: break-word;
-    }}
-    
-    .source-excerpt:hover {{
-        box-shadow: 0 3px 8px rgba({theme['primary_color']}, 0.15);
-    }}
-    
-    /* Relevance badge */
-    .relevance-badge {{
-        display: inline-block;
-        background: {theme['primary_color']};
-        color: white;
-        padding: 0.2rem 0.6rem;
-        border-radius: 12px;
-        font-size: 0.75rem;
-        font-weight: 600;
-        margin-bottom: 0.5rem;
-    }}
-    
-    /* Title styling */
-    h1 {{
-        color: #1A1A1A;
-        font-weight: 700;
-        text-shadow: 2px 2px 4px rgba({theme['primary_color']}, 0.1);
-    }}
-    
-    /* Subtitle */
-    .subtitle {{
-        color: {theme['primary_color']};
-        font-size: 1.1rem;
-        font-weight: 600;
-    }}
-    
-    /* Info boxes */
-    .stAlert {{
-        border-radius: 8px;
-    }}
-    
-    /* Metric styling */
-    .metric-container {{
-        background: linear-gradient(135deg, {theme['gradient_start']} 0%, {theme['gradient_end']} 100%);
-        padding: 1rem;
-        border-radius: 10px;
-        color: white;
-        margin: 0.5rem 0;
-        text-align: center;
-        box-shadow: 0 3px 6px rgba(0, 0, 0, 0.15);
-    }}
-    
-    /* Mode toggle buttons */
-    .stRadio > div {{
-        flex-direction: row !important;
-        gap: 1rem;
-        justify-content: center;
-        margin-bottom: 2rem;
-    }}
-    
-    .stRadio > div > label {{
-        background: white;
-        padding: 0.75rem 1.5rem;
-        border-radius: 8px;
-        border: 2px solid #e0e0e0;
-        cursor: pointer;
-        transition: all 0.3s ease;
-        font-weight: 600;
-        font-size: 1.1rem;
-    }}
-    
-    .stRadio > div > label:hover {{
-        border-color: {theme['primary_color']};
-        background: #f8f9fa;
-    }}
-    
-    .stRadio > div > label[data-baseweb="radio"] > div:first-child {{
-        display: none;
-    }}
-    
-    /* Responsive images */
-    img {{
-        max-width: 100%;
-        height: auto;
-    }}
-    
-    /* Responsive containers */
-    .stContainer {{
-        max-width: 100%;
-    }}
-</style>
-""", unsafe_allow_html=True)
+/* ── Base ─────────────────────────────── */
+.stApp {{ background-color: {bg} !important; }}
+.main  {{ background-color: {bg} !important; padding: 2rem; }}
 
-# Auto-scroll JavaScript for mobile
+/* ── Typography ───────────────────────── */
+h1,h2,h3 {{ color: {text} !important; }}
+.subtitle {{ color: {sub_text}; font-size:1.1rem; font-weight:600; }}
+
+/* ── Global text fill (Safari/iOS) ────── */
+p, span, li, .stMarkdown, .stMarkdown p, .stMarkdown span, .stMarkdown li {{
+    color: {text} !important;
+    -webkit-text-fill-color: {text} !important;
+}}
+
+/* ── Chat messages ─────────────────────── */
+.stChatMessage {{
+    background-color: {chat_bg} !important;
+    border-radius: 10px;
+    padding: 1rem;
+    margin-bottom: 1rem;
+    border-left: 4px solid {p};
+    word-wrap: break-word;
+}}
+.stChatMessage p,
+.stChatMessage div,
+.stChatMessage span,
+.stChatMessage li {{
+    color: {text} !important;
+    -webkit-text-fill-color: {text} !important;
+}}
+
+/* ── Timestamp ─────────────────────────── */
+.msg-ts {{
+    font-size: 0.7rem;
+    color: #888;
+    text-align: right;
+    margin-top: 0.3rem;
+}}
+
+/* ── Source type badges ────────────────── */
+.source-type-badge {{
+    display: inline-block;
+    padding: 0.3rem 0.7rem;
+    border-radius: 12px;
+    font-size: 0.78rem;
+    font-weight: 700;
+    margin-right: 0.4rem;
+    margin-bottom: 0.5rem;
+    letter-spacing: 0.3px;
+}}
+.source-cba        {{ background: #1565C0; color: white; }}
+.source-operations {{ background: #6A1B9A; color: white; }}
+.source-unknown    {{ background: #37474F; color: white; }}
+
+/* ── Rule / location badge ─────────────── */
+.rule-location {{
+    display: inline-block;
+    background: linear-gradient(135deg, {s} 0%, {p} 100%);
+    color: white;
+    padding: 0.35rem 0.75rem;
+    border-radius: 6px;
+    font-size: 0.82rem;
+    font-weight: 700;
+    margin-right: 0.4rem;
+    margin-bottom: 0.5rem;
+    border: 2px solid {p};
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+}}
+
+/* ── Confidence badge ──────────────────── */
+.conf-badge {{
+    display: inline-block;
+    padding: 0.2rem 0.7rem;
+    border-radius: 12px;
+    font-size: 0.78rem;
+    font-weight: 600;
+    margin-bottom: 0.5rem;
+}}
+
+/* ── Source excerpt ────────────────────── */
+.source-excerpt {{
+    background: {excerpt_bg};
+    padding: 1rem 1.5rem;
+    border-radius: 8px;
+    margin: 0.4rem 0 0.8rem 0;
+    border-left: 3px solid {p};
+    color: {excerpt_text} !important;
+    -webkit-text-fill-color: {excerpt_text} !important;
+    font-size: 0.93rem;
+    line-height: 1.6;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.06);
+    word-wrap: break-word;
+}}
+
+/* ── Cross-mode suggestion ─────────────── */
+.cross-mode-box {{
+    background: linear-gradient(135deg,#1565C0 0%,#42A5F5 100%);
+    color: white !important;
+    -webkit-text-fill-color: white !important;
+    padding: 0.75rem 1rem;
+    border-radius: 8px;
+    margin-top: 0.75rem;
+    font-size: 0.9rem;
+}}
+.cross-mode-box p,
+.cross-mode-box span {{
+    color: white !important;
+    -webkit-text-fill-color: white !important;
+}}
+
+/* ── Welcome example buttons ───────────── */
+div[data-testid="stButton"] button[kind="secondary"] {{
+    border: 2px solid {p};
+    border-radius: 8px;
+    background: {surface};
+    color: {text};
+    text-align: left;
+    transition: all 0.2s ease;
+}}
+div[data-testid="stButton"] button[kind="secondary"]:hover {{
+    background: {p}22;
+    border-color: {p};
+}}
+
+/* ── Metric card ───────────────────────── */
+.metric-card {{
+    background: linear-gradient(135deg, {theme["gradient_start"]} 0%, {theme["gradient_end"]} 100%);
+    padding: 1rem;
+    border-radius: 10px;
+    color: white;
+    text-align: center;
+    box-shadow: 0 3px 6px rgba(0,0,0,0.15);
+    margin: 0.4rem 0;
+}}
+.metric-card h2, .metric-card p {{ color: white !important; margin: 0; }}
+
+/* ── Sidebar ───────────────────────────── */
+[data-testid="stSidebar"] {{
+    background-color: {surface} !important;
+}}
+[data-testid="stSidebar"] p,
+[data-testid="stSidebar"] span,
+[data-testid="stSidebar"] label {{
+    color: {text} !important;
+    -webkit-text-fill-color: {text} !important;
+}}
+
+/* ── Chat input ────────────────────────── */
+.stChatInputContainer textarea,
+.stChatInputContainer input,
+[data-testid="stChatInput"] textarea,
+[data-testid="stChatInput"] input,
+[data-baseweb="textarea"] textarea {{
+    color: {text} !important;
+    -webkit-text-fill-color: {text} !important;
+    background-color: {surface} !important;
+    opacity: 1 !important;
+}}
+textarea::placeholder, input::placeholder {{
+    color: #777 !important;
+    -webkit-text-fill-color: #777 !important;
+    opacity: 1 !important;
+}}
+
+/* ── Stray Streamlit chrome ────────────── */
+footer {{ display: none !important; }}
+
+/* ── Responsive ────────────────────────── */
+@media (max-width: 768px) {{
+    .main {{ padding: 1rem !important; padding-bottom: 100px !important; }}
+    h1    {{ font-size: 1.4rem !important; }}
+}}
+</style>
+"""
+
+st.markdown(build_css(THEMES[st.session_state.mode], st.session_state.dark_mode), unsafe_allow_html=True)
+
+# Auto-scroll JS (mobile)
 st.markdown("""
 <script>
-    function scrollToBottom() {
-        if (window.innerWidth <= 768) {
-            setTimeout(function() {
-                window.scrollTo({
-                    top: document.body.scrollHeight,
-                    behavior: 'smooth'
-                });
-            }, 100);
-        }
-    }
-    
-    const observer = new MutationObserver(function(mutations) {
-        mutations.forEach(function(mutation) {
-            if (mutation.addedNodes.length) {
-                scrollToBottom();
-            }
-        });
-    });
-    
-    window.addEventListener('load', function() {
-        const targetNode = document.querySelector('.main');
-        if (targetNode) {
-            observer.observe(targetNode, {
-                childList: true,
-                subtree: true
-            });
-        }
-        scrollToBottom();
-    });
+function scrollToBottom(){
+  if(window.innerWidth<=768){
+    setTimeout(()=>window.scrollTo({top:document.body.scrollHeight,behavior:'smooth'}),120);
+  }
+}
+const obs=new MutationObserver(()=>scrollToBottom());
+window.addEventListener('load',()=>{
+  const n=document.querySelector('.main');
+  if(n) obs.observe(n,{childList:true,subtree:true});
+  scrollToBottom();
+});
 </script>
 """, unsafe_allow_html=True)
 
-# Initialize AWS Bedrock client
+
+# ─────────────────────────────────────────────
+# AWS BEDROCK CLIENT
+# ─────────────────────────────────────────────
 @st.cache_resource
 def get_bedrock_client():
-    """Initialize and cache the Bedrock Agent Runtime client"""
     try:
         if "aws" in st.secrets:
-            required_keys = ["access_key_id", "secret_access_key"]
-            missing_keys = [key for key in required_keys if key not in st.secrets["aws"]]
-            
-            if missing_keys:
-                st.error(f"⚠️ Missing keys in secrets: {', '.join(missing_keys)}")
+            missing = [k for k in ["access_key_id", "secret_access_key"] if k not in st.secrets["aws"]]
+            if missing:
+                st.error(f"⚠️ Missing secret keys: {', '.join(missing)}")
                 return None
-            
             return boto3.client(
-                service_name='bedrock-agent-runtime',
+                service_name="bedrock-agent-runtime",
                 aws_access_key_id=st.secrets["aws"]["access_key_id"],
                 aws_secret_access_key=st.secrets["aws"]["secret_access_key"],
-                region_name=st.secrets["aws"].get("region", "us-east-1")
+                region_name=st.secrets["aws"].get("region", "us-east-1"),
             )
         else:
             st.error("⚠️ No AWS credentials found in secrets!")
-            st.info("""
-            **To fix this:**
-            1. Go to Streamlit Cloud dashboard
-            2. Click Settings → Secrets
-            3. Add your AWS credentials
-            """)
             return None
     except Exception as e:
-        st.error(f"⚠️ Error initializing Bedrock client: {str(e)}")
+        st.error(f"⚠️ Error initialising Bedrock client: {e}")
         return None
 
-def query_knowledge_base(question, knowledge_base_id, model_arn, mode="rulebook", session_id=None):
-    """Query the Bedrock Knowledge Base with conversation memory support"""
+
+# ─────────────────────────────────────────────
+# CITATION RENDERING (single helper – no duplication)
+# ─────────────────────────────────────────────
+def render_citations(citations: list, mode: str):
+    """Deduplicate, badge, and render citations for any mode."""
+    if not citations:
+        return
+
+    # ── Deduplicate by URI ──
+    seen, unique = set(), []
+    for c in citations:
+        uri = c.get("uri", "")
+        if uri not in seen:
+            seen.add(uri)
+            unique.append(c)
+
+    # ── Confidence indicator ──
+    conf_label, conf_color = get_confidence(unique)
+    st.markdown(
+        f'<span class="conf-badge" style="background:{conf_color}22;color:{conf_color};'
+        f'border:1px solid {conf_color};">Confidence: {conf_label}</span>',
+        unsafe_allow_html=True,
+    )
+
+    for citation in unique:
+        content  = citation.get("content", "No content available")
+        metadata = citation.get("metadata", {})
+        uri      = citation.get("uri", "")
+
+        badge_html = ""
+
+        # ── CBA source-document badge (CBA mode only) ──
+        if mode == "cba":
+            badge_label, css_cls, doc_name = identify_cba_source(uri)
+            badge_html += f'<span class="source-type-badge {css_cls}">{badge_label}</span>'
+
+        # ── Location / rule metadata badge ──
+        loc_parts = [
+            f"{k.title()} {metadata[k]}"
+            for k in ["rule", "section", "article", "part", "subsection", "page"]
+            if k in metadata
+        ]
+        if loc_parts:
+            badge_html += f'<span class="rule-location">📍 {", ".join(loc_parts)}</span>'
+
+        if badge_html:
+            st.markdown(f'<div style="margin-bottom:0.3rem">{badge_html}</div>', unsafe_allow_html=True)
+
+        # ── Excerpt preview ──
+        preview = (content[:200] + "…") if len(content) > 200 else content
+        st.markdown(
+            f'<div class="source-excerpt">{preview.replace("$", r"$")}</div>',
+            unsafe_allow_html=True,
+        )
+
+        # ── Full text expander ──
+        if len(content) > 200:
+            with st.expander("📖 Read full excerpt"):
+                st.markdown(f"_{content.replace('$', r'$')}_")
+
+        # ── Copy source text ──
+        with st.expander("📋 Copy source text"):
+            st.code(content, language=None)
+
+        st.markdown("")
+
+
+# ─────────────────────────────────────────────
+# KNOWLEDGE BASE QUERY
+# ─────────────────────────────────────────────
+def _extract_citations(response: dict) -> list:
+    citations = []
+    for cit in response.get("citations", []):
+        for ref in cit.get("retrievedReferences", []):
+            s3 = ref.get("location", {}).get("s3Location", {})
+            citations.append({
+                "content":  ref.get("content", {}).get("text", "No content available"),
+                "uri":      s3.get("uri", "Unknown source"),
+                "metadata": ref.get("metadata", {}),
+            })
+    return citations
+
+
+def query_knowledge_base(question: str, knowledge_base_id: str, model_arn: str,
+                          mode: str = "rulebook", session_id: str = None):
+    """Query Bedrock Knowledge Base. Returns (response_text, citations, session_id)."""
     client = get_bedrock_client()
-    
     if not client:
-        return "Error: Could not initialize Bedrock client", [], None
-    
-    # Generate a new session ID if none provided
+        return "Error: Could not initialise Bedrock client.", [], None
+
     if session_id is None:
         session_id = str(uuid.uuid4())
-    
-    try:
-        # Enhanced prompt based on mode
-        if mode == "rulebook":
-            enhanced_prompt = f"""You are an expert NBA rules analyst with deep knowledge of basketball regulations. Use the rulebook sources provided to answer the following question.
+
+    if mode == "rulebook":
+        prompt = f"""You are an expert NBA rules analyst with deep knowledge of basketball regulations.
+Use the rulebook sources provided to answer the following question.
 
 Question: {question}
 
-Instructions for your answer:
-1. If the answer requires combining multiple rules, identify each relevant rule first, then explain how they connect logically
-2. For "what if" or scenario questions, break down the scenario and apply the relevant rules step-by-step
-3. If a direct answer isn't explicitly stated but can be logically inferred from the rules, explain your reasoning process
-4. Always cite specific rules (e.g., "According to Rule 12, Section II...")
-5. Be confident in logical inferences that follow from the stated rules
-6. Provide clear, comprehensive explanations with your reasoning
-7. Remember the context of our conversation - if this is a follow-up question, reference what we previously discussed
+Instructions:
+1. Combine multiple rules when needed – identify each relevant rule first.
+2. For scenario / "what if" questions, reason step-by-step.
+3. Always cite specific rules (e.g., "According to Rule 12, Section II…").
+4. Be confident in logical inferences that follow from the stated rules.
+5. Reference prior conversation context when answering follow-ups.
 
 Answer:"""
-        else:  # CBA mode
-            enhanced_prompt = f"""You are an expert on the NBA Collective Bargaining Agreement (CBA) with deep knowledge of salary cap rules, contract structures, and league regulations. Use the CBA sources provided to answer the following question.
+    else:
+        prompt = f"""You are an expert on the NBA Collective Bargaining Agreement (CBA) and the NBA
+Basketball Operations Manual. Use the sources provided to answer the following question.
 
 Question: {question}
 
-Instructions for your answer:
-1. If the answer involves multiple CBA articles or salary cap rules, explain how they work together
-2. For questions about contracts or cap situations, break down the calculation or process step-by-step
-3. Always cite specific CBA articles or sections when available
-4. Explain complex financial terms in clear language
-5. If discussing salary cap implications, include relevant numbers or percentages when applicable
-6. Provide practical examples when helpful
-7. Remember the context of our conversation - if this is a follow-up question, reference what we previously discussed
+Instructions:
+1. Explicitly note when information comes from the CBA versus the Operations Manual.
+2. Explain how multiple CBA articles or salary-cap rules interact when relevant.
+3. Cite specific CBA articles or Operations Manual sections.
+4. Translate complex financial terms into plain language.
+5. Include relevant dollar figures or percentages where applicable.
+6. Reference prior conversation context when answering follow-ups.
 
 Answer:"""
 
-        # Build the API request with sessionId for conversation memory
-        request_params = {
-            'input': {
-                'text': enhanced_prompt
+    params = {
+        "input": {"text": prompt},
+        "retrieveAndGenerateConfiguration": {
+            "type": "KNOWLEDGE_BASE",
+            "knowledgeBaseConfiguration": {
+                "knowledgeBaseId": knowledge_base_id,
+                "modelArn": model_arn,
             },
-            'retrieveAndGenerateConfiguration': {
-                'type': 'KNOWLEDGE_BASE',
-                'knowledgeBaseConfiguration': {
-                    'knowledgeBaseId': knowledge_base_id,
-                    'modelArn': model_arn
-                }
-            }
-        }
-        
-        # Add sessionId to maintain conversation context
-        if session_id:
-            request_params['sessionId'] = session_id
-        
-        response = client.retrieve_and_generate(**request_params)
-        
-        # Get the session ID from response (will be the same or newly generated)
-        returned_session_id = response.get('sessionId', session_id)
-        
-        # Extract the generated response
-        generated_text = response['output']['text']
-        
-        # Extract detailed source citations
-        citations = []
-        if 'citations' in response:
-            for citation in response['citations']:
-                if 'retrievedReferences' in citation:
-                    for ref in citation['retrievedReferences']:
-                        content = ref.get('content', {}).get('text', 'No content available')
-                        location = ref.get('location', {})
-                        s3_location = location.get('s3Location', {})
-                        
-                        citation_data = {
-                            'content': content,
-                            'uri': s3_location.get('uri', 'Unknown source'),
-                            'metadata': ref.get('metadata', {})
-                        }
-                        citations.append(citation_data)
-        
-        return generated_text, citations, returned_session_id
-        
-    except ClientError as e:
-        error_code = e.response['Error']['Code']
-        error_message = e.response['Error']['Message']
-        
-        # Handle configuration change in active session - retry with new session
-        if error_code == 'ValidationException' and 'Knowledge base configurations cannot be modified' in error_message:
-            try:
-                # Remove the old session ID and let AWS create a new one
-                if 'sessionId' in request_params:
-                    del request_params['sessionId']
-                
-                # Retry the request - AWS will create a new session automatically
-                response = client.retrieve_and_generate(**request_params)
-                returned_session_id = response.get('sessionId', None)
-                generated_text = response['output']['text']
-                
-                # Extract citations
-                citations = []
-                if 'citations' in response:
-                    for citation in response['citations']:
-                        if 'retrievedReferences' in citation:
-                            for ref in citation['retrievedReferences']:
-                                content = ref.get('content', {}).get('text', 'No content available')
-                                location = ref.get('location', {})
-                                s3_location = location.get('s3Location', {})
-                                
-                                citation_data = {
-                                    'content': content,
-                                    'uri': s3_location.get('uri', 'Unknown source'),
-                                    'metadata': ref.get('metadata', {})
-                                }
-                                citations.append(citation_data)
-                
-                return generated_text, citations, returned_session_id
-            except Exception as retry_error:
-                return f"Configuration changed and retry failed: {str(retry_error)}", [], None
-        
-        # Handle expired/invalid session - retry WITHOUT session ID to start fresh
-        if error_code == 'ValidationException' and 'Session' in error_message and 'not valid' in error_message:
-            try:
-                # Remove the old session ID and let AWS create a new one
-                if 'sessionId' in request_params:
-                    del request_params['sessionId']
-                
-                # Retry the request - AWS will create a new session automatically
-                response = client.retrieve_and_generate(**request_params)
-                returned_session_id = response.get('sessionId', None)
-                generated_text = response['output']['text']
-                
-                # Extract citations
-                citations = []
-                if 'citations' in response:
-                    for citation in response['citations']:
-                        if 'retrievedReferences' in citation:
-                            for ref in citation['retrievedReferences']:
-                                content = ref.get('content', {}).get('text', 'No content available')
-                                location = ref.get('location', {})
-                                s3_location = location.get('s3Location', {})
-                                
-                                citation_data = {
-                                    'content': content,
-                                    'uri': s3_location.get('uri', 'Unknown source'),
-                                    'metadata': ref.get('metadata', {})
-                                }
-                                citations.append(citation_data)
-                
-                return generated_text, citations, returned_session_id
-            except Exception as retry_error:
-                return f"Session expired and retry failed: {str(retry_error)}", [], None
-        
-        return f"AWS Error ({error_code}): {error_message}", [], session_id
-    except Exception as e:
-        return f"Error querying knowledge base: {str(e)}", [], session_id
+        },
+    }
+    if session_id:
+        params["sessionId"] = session_id
 
-# Main app
+    try:
+        resp              = client.retrieve_and_generate(**params)
+        new_session_id    = resp.get("sessionId", session_id)
+        generated_text    = resp["output"]["text"]
+        citations         = _extract_citations(resp)
+        return generated_text, citations, new_session_id
+
+    except ClientError as e:
+        code    = e.response["Error"]["Code"]
+        message = e.response["Error"]["Message"]
+
+        # Retry without session if session/config is stale
+        if code == "ValidationException" and (
+            "Knowledge base configurations cannot be modified" in message
+            or "Session" in message
+        ):
+            params.pop("sessionId", None)
+            try:
+                resp           = client.retrieve_and_generate(**params)
+                new_session_id = resp.get("sessionId")
+                return resp["output"]["text"], _extract_citations(resp), new_session_id
+            except Exception as retry_err:
+                return f"Retry failed: {retry_err}", [], None
+
+        return f"AWS Error ({code}): {message}", [], session_id
+
+    except Exception as e:
+        return f"Error querying knowledge base: {e}", [], session_id
+
+
+# ─────────────────────────────────────────────
+# QUIZ HELPERS
+# ─────────────────────────────────────────────
+QUIZ_TOPICS = {
+    "rulebook": ["General Rules", "Fouls & Violations", "Shot Clock", "Out of Bounds", "Officials", "Overtime"],
+    "cba":      ["Salary Cap", "Free Agency", "Trade Rules", "Contract Types", "Luxury Tax", "Waivers & Buyouts"],
+}
+
+def generate_quiz_question(kb_id: str, model_arn: str, mode: str, topic: str):
+    """Ask the KB to generate a multiple-choice quiz question."""
+    domain = "NBA rules" if mode == "rulebook" else "NBA CBA / salary cap rules"
+    quiz_prompt = f"""Generate a challenging but fair multiple-choice quiz question about {domain},
+specifically on the topic of: {topic}.
+
+Reply in EXACTLY this format (no extra text):
+QUESTION: [question text]
+A) [option]
+B) [option]
+C) [option]
+D) [option]
+ANSWER: [A, B, C, or D]
+EXPLANATION: [one or two sentences citing the specific rule or CBA article]"""
+
+    return query_knowledge_base(quiz_prompt, kb_id, model_arn, mode, session_id=None)
+
+
+def parse_quiz(text: str):
+    """Parse structured quiz text into a dict. Returns None on failure."""
+    q = {"question": "", "options": {}, "answer": "", "explanation": ""}
+    for line in text.strip().splitlines():
+        line = line.strip()
+        if line.startswith("QUESTION:"):
+            q["question"] = line.removeprefix("QUESTION:").strip()
+        elif len(line) >= 2 and line[0] in "ABCD" and line[1] == ")":
+            q["options"][line[0]] = line[2:].strip()
+        elif line.startswith("ANSWER:"):
+            q["answer"] = line.removeprefix("ANSWER:").strip().upper()
+        elif line.startswith("EXPLANATION:"):
+            q["explanation"] = line.removeprefix("EXPLANATION:").strip()
+    return q if q["question"] and q["options"] and q["answer"] else None
+
+
+# ─────────────────────────────────────────────
+# EXPORT HELPER
+# ─────────────────────────────────────────────
+def export_chat(messages: list, mode: str) -> str:
+    t = THEMES[mode]
+    lines = [
+        f"# {t['title']}",
+        f"**Mode:** {t['name']}  ",
+        f"**Exported:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        "", "---", "",
+    ]
+    for msg in messages:
+        role  = "🧑 You" if msg["role"] == "user" else f"{t['icon']} Assistant"
+        ts    = f" *{msg['timestamp']}*" if msg.get("timestamp") else ""
+        lines += [f"### {role}{ts}", msg["content"], ""]
+
+        if msg["role"] == "assistant" and msg.get("citations"):
+            seen, srcs = set(), []
+            for c in msg["citations"]:
+                u = c.get("uri", "")
+                if u not in seen:
+                    seen.add(u)
+                    srcs.append(f"- {u}")
+            if srcs:
+                lines += ["**Sources:**"] + srcs + [""]
+
+        lines += ["---", ""]
+    return "\n".join(lines)
+
+
+# ─────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────
 def main():
-    # Mode selector at the top
-    col1, col2, col3 = st.columns([1, 2, 1])
-    with col2:
+    # ──────────────────────────────────────────
+    # SIDEBAR
+    # ──────────────────────────────────────────
+    with st.sidebar:
+        # Dark / Light toggle
+        dark_label = "☀️ Light Mode" if st.session_state.dark_mode else "🌙 Dark Mode"
+        if st.button(dark_label, use_container_width=True):
+            st.session_state.dark_mode = not st.session_state.dark_mode
+            st.rerun()
+
+        st.markdown("---")
+
+        # Mode toggle (sticky in sidebar)
+        st.markdown("### 🔄 Mode")
         selected_mode = st.radio(
             "",
             options=["rulebook", "cba"],
             format_func=lambda x: THEMES[x]["name"],
-            horizontal=True,
-            label_visibility="collapsed"
+            index=list(THEMES.keys()).index(st.session_state.mode),
+            label_visibility="collapsed",
         )
-        
-        # Clear messages if mode changes
         if selected_mode != st.session_state.mode:
-            st.session_state.mode = selected_mode
+            st.session_state.mode     = selected_mode
             st.session_state.messages = []
-            # Reset session ID when switching modes (different knowledge bases)
             st.session_state.session_ids[selected_mode] = None
+            st.session_state.current_quiz   = None
+            st.session_state.quiz_raw       = None
             st.rerun()
-    
-    # Get current theme
-    theme = THEMES[st.session_state.mode]
-    
-    # Title and subtitle
-    st.markdown(f'<h1>{theme["title"]}</h1>', unsafe_allow_html=True)
-    st.markdown(f'<p class="subtitle">{theme["subtitle"]}</p>', unsafe_allow_html=True)
-    st.markdown("---")
-    
-    # Sidebar configuration
-    with st.sidebar:
-        st.markdown(f"## {theme['icon']} Configuration")
+
         st.markdown("---")
-        
-        # Knowledge Base ID (pre-filled based on mode)
+
+        theme = THEMES[st.session_state.mode]
+        st.markdown(f"## {theme['icon']} Configuration")
+
         kb_id = st.text_input(
             "📊 Knowledge Base ID",
             value=theme["kb_id"],
-            help="Your Bedrock Knowledge Base ID"
+            help="Your Bedrock Knowledge Base ID",
         )
-        
+
         # Model selection
         st.subheader("Model Settings")
         model_options = {
-            "Claude Sonnet 4.5 ⭐ (Best)": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            "Claude Sonnet 4.5 ⭐ (Best)":    "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
             "Claude Opus 4.1 (Most Powerful)": "us.anthropic.claude-opus-4-1-20250805-v1:0",
-            "Claude Sonnet 4": "us.anthropic.claude-sonnet-4-20250514-v1:0",
-            "Claude Haiku 4.5 (Fastest)": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
-            "Claude 3 Opus": "us.anthropic.claude-3-opus-20240229-v1:0",
-            "Claude 3.5 Sonnet v2": "us.anthropic.claude-3-5-sonnet-20241022-v2:0",
-            "Claude 3.5 Sonnet v1": "us.anthropic.claude-3-5-sonnet-20240620-v1:0",
-            "Claude 3 Sonnet": "us.anthropic.claude-3-sonnet-20240229-v1:0",
-            "Claude 3 Haiku": "us.anthropic.claude-3-haiku-20240307-v1:0"
+            "Claude Sonnet 4":                 "us.anthropic.claude-sonnet-4-20250514-v1:0",
+            "Claude Haiku 4.5 (Fastest)":      "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+            "Claude 3.5 Sonnet v2":            "us.anthropic.claude-3-5-sonnet-20241022-v2:0",
+            "Claude 3 Haiku":                  "us.anthropic.claude-3-haiku-20240307-v1:0",
         }
-        
-        # Set default based on mode
-        default_model = "Claude Sonnet 4.5 ⭐ (Best)" if st.session_state.mode == "cba" else "Claude Haiku 4.5 (Fastest)"
-        default_index = list(model_options.keys()).index(default_model)
-        
-        model_display = st.selectbox(
-            "🤖 Claude Model",
-            list(model_options.keys()),
-            index=default_index,
-            help="Select the Claude model to use. Claude 4 models offer the best performance!"
-        )
-        
-        model_arn = model_options[model_display]
-        
-        # Check if model or KB changed - reset session if so
-        current_mode = st.session_state.mode
-        last_model = st.session_state.last_config[current_mode]["model"]
-        last_kb = st.session_state.last_config[current_mode]["kb_id"]
-        
-        if last_model != model_arn or last_kb != kb_id:
-            # Configuration changed - reset session for this mode
-            st.session_state.session_ids[current_mode] = None
-            st.session_state.last_config[current_mode]["model"] = model_arn
-            st.session_state.last_config[current_mode]["kb_id"] = kb_id
-        
+        default_model  = "Claude Sonnet 4.5 ⭐ (Best)" if st.session_state.mode == "cba" else "Claude Haiku 4.5 (Fastest)"
+        model_display  = st.selectbox("🤖 Claude Model", list(model_options.keys()),
+                                      index=list(model_options.keys()).index(default_model))
+        model_arn      = model_options[model_display]
+
+        # Detect config change → reset session
+        cur = st.session_state.mode
+        if (st.session_state.last_config[cur]["model"] != model_arn
+                or st.session_state.last_config[cur]["kb_id"] != kb_id):
+            st.session_state.session_ids[cur] = None
+            st.session_state.last_config[cur] = {"model": model_arn, "kb_id": kb_id}
+
         st.markdown("---")
-        
-        # Session statistics
+
+        # Stats
         st.markdown("### 📊 Stats")
-        
-        message_count = len([m for m in st.session_state.messages if m['role'] == 'user'])
+        q_count = len([m for m in st.session_state.messages if m["role"] == "user"])
         st.markdown(f"""
-        <div class="metric-container">
-            <h2 style="margin: 0; font-size: 2rem;">{theme['icon']} {message_count}</h2>
-            <p style="margin: 0; opacity: 0.9;">Questions Asked</p>
-        </div>
-        """, unsafe_allow_html=True)
-        
+        <div class="metric-card">
+            <h2 style="font-size:2rem;">{theme['icon']} {q_count}</h2>
+            <p>Questions Asked</p>
+        </div>""", unsafe_allow_html=True)
+
         st.markdown("---")
-        
+
+        # Tips
         st.markdown("### 💡 Tips")
         if st.session_state.mode == "rulebook":
             st.markdown("""
-            - Ask about specific rules
-            - Reference rule sections or numbers
-            - Ask for clarifications
-            - Compare different scenarios
-            - **Ask follow-up questions** - I remember our conversation!
-            """)
-        else:  # CBA mode
+- Ask about specific rules by number
+- Ask follow-up questions (memory is on)
+- Use **Scenario Simulator** for play rulings
+- Try **Quiz Me** to test your knowledge
+""")
+        else:
             st.markdown("""
-            - Ask about salary cap rules
-            - Contract structures and types
-            - Free agency regulations
-            - Trade and roster rules
-            - **Ask follow-up questions** - I remember our conversation!
-            """)
-        
+- Ask about CBA articles or salary-cap math
+- Source badges show CBA vs Operations Manual
+- Ask follow-up questions (memory is on)
+- Try **Quiz Me** to test your CBA knowledge
+""")
+
         st.markdown("---")
-        
-        st.markdown("### 🤖 Model Guide")
-        st.markdown("""
-        **Claude 4 Models (Newest!):**
-        - **Sonnet 4.5** ⭐ - Best overall
-        - **Opus 4.1** - Most powerful
-        - **Haiku 4.5** - Fastest & cheap
-        
-        **When to use what:**
-        - Complex questions → Sonnet 4.5
-        - Simple lookups → Haiku 4.5
-        - Edge cases → Opus 4.1
-        
-        **Note:** Changing models starts a new session (conversation restarts).
-        """)
-        
-        st.markdown("---")
-        
-        col1, col2 = st.columns(2)
-        with col1:
+
+        # Actions
+        st.markdown("### ⚡ Actions")
+        c1, c2 = st.columns(2)
+        with c1:
             if st.button("🗑️ Clear", use_container_width=True):
-                st.session_state.messages = []
-                # Reset session ID for current mode to start fresh conversation
+                st.session_state.messages     = []
+                st.session_state.current_quiz = None
+                st.session_state.quiz_raw     = None
                 st.session_state.session_ids[st.session_state.mode] = None
                 st.rerun()
-        with col2:
+        with c2:
             if st.button("🔄 Refresh", use_container_width=True):
                 st.rerun()
-    
-    # Show welcome screen if no messages
+
+        # Export
+        if st.session_state.messages:
+            md_export = export_chat(st.session_state.messages, st.session_state.mode)
+            ts_str    = datetime.now().strftime("%Y%m%d_%H%M")
+            st.download_button(
+                label="📥 Export Chat",
+                data=md_export,
+                file_name=f"nba_{st.session_state.mode}_{ts_str}.md",
+                mime="text/markdown",
+                use_container_width=True,
+            )
+
+    # ──────────────────────────────────────────
+    # HEADER
+    # ──────────────────────────────────────────
+    theme = THEMES[st.session_state.mode]
+    st.markdown(f'<h1>{theme["title"]}</h1>', unsafe_allow_html=True)
+    st.markdown(f'<p class="subtitle">{theme["subtitle"]}</p>', unsafe_allow_html=True)
+    st.markdown("---")
+
+    # ──────────────────────────────────────────
+    # QUIZ ME
+    # ──────────────────────────────────────────
+    with st.expander("🎯 Quiz Me!", expanded=False):
+        topics = QUIZ_TOPICS[st.session_state.mode]
+        topic  = st.selectbox("Choose a topic:", topics, key="quiz_topic_select")
+
+        if st.button("🎲 Generate Question", use_container_width=True, key="gen_quiz"):
+            st.session_state.current_quiz     = None
+            st.session_state.quiz_raw         = None
+            st.session_state.show_quiz_answer = False
+            with st.spinner("Generating quiz question…"):
+                raw_resp, _, _ = generate_quiz_question(kb_id, model_arn, st.session_state.mode, topic)
+                parsed = parse_quiz(raw_resp)
+                if parsed:
+                    st.session_state.current_quiz = parsed
+                else:
+                    st.session_state.quiz_raw = raw_resp
+
+        quiz = st.session_state.current_quiz
+        if quiz:
+            st.markdown(f"**Q: {quiz['question']}**")
+            user_ans = st.radio(
+                "Your answer:",
+                options=list(quiz["options"].keys()),
+                format_func=lambda x: f"{x}) {quiz['options'][x]}",
+                key=f"quiz_radio_{quiz['question'][:30]}",
+            )
+            if st.button("✅ Submit Answer", key="submit_quiz"):
+                st.session_state.show_quiz_answer = True
+
+            if st.session_state.show_quiz_answer:
+                correct = quiz["answer"].strip().upper()
+                if user_ans == correct:
+                    st.success(f"🎉 Correct! The answer is **{correct}**.")
+                else:
+                    st.error(f"❌ Not quite. The correct answer is **{correct}**.")
+                if quiz.get("explanation"):
+                    st.info(f"📖 {quiz['explanation']}")
+
+        elif st.session_state.quiz_raw:
+            # Structured parse failed – show raw response
+            st.markdown(st.session_state.quiz_raw)
+
+    # ──────────────────────────────────────────
+    # SCENARIO SIMULATOR (Rulebook only)
+    # ──────────────────────────────────────────
+    if st.session_state.mode == "rulebook":
+        with st.expander("🏀 Scenario Simulator — Get a rules ruling", expanded=False):
+            sc1, sc2 = st.columns(2)
+            with sc1:
+                play_type  = st.selectbox("Play type", [
+                    "Drive to basket", "Three-point attempt", "Post play",
+                    "Pick and roll", "Inbound play", "Jump ball", "Free throw", "Other",
+                ], key="sim_play")
+                game_clock = st.text_input("Game clock (e.g. 0:04)", key="sim_gclk")
+            with sc2:
+                shot_clock = st.selectbox("Shot clock", [
+                    "Active (>0)", "Expired (0)", "Not applicable",
+                ], key="sim_sclk")
+                court_pos  = st.selectbox("Court position", [
+                    "Paint/Key", "Mid-range", "Three-point line",
+                    "Half court", "Backcourt", "Out-of-bounds area",
+                ], key="sim_pos")
+
+            situation = st.text_area(
+                "Describe what happened:",
+                placeholder="e.g. Player catches pass, takes two steps, pump-fakes, then shuffles again before releasing…",
+                height=90,
+                key="sim_desc",
+            )
+
+            if st.button("📋 Get Ruling", use_container_width=True, key="sim_submit") and situation.strip():
+                scenario_prompt = (
+                    f"Scenario Ruling Request:\n\n"
+                    f"Play Type: {play_type}\n"
+                    f"Court Position: {court_pos}\n"
+                    f"Game Clock: {game_clock or 'Not specified'}\n"
+                    f"Shot Clock: {shot_clock}\n\n"
+                    f"Situation: {situation}\n\n"
+                    f"Please provide a clear ruling on this situation, citing the exact rules that apply."
+                )
+                st.session_state.pending_prompt = scenario_prompt
+                st.rerun()
+
+    # ──────────────────────────────────────────
+    # WELCOME SCREEN (no messages yet)
+    # ──────────────────────────────────────────
     if len(st.session_state.messages) == 0:
-        col1, col2, col3 = st.columns([1, 2, 1])
-        with col2:
+        _, mid, _ = st.columns([1, 2, 1])
+        with mid:
             st.markdown(f"""
-            <div style="text-align: center; padding: 2rem;">
-                <h2 style="color: {theme['primary_color']};">{theme['icon']} Welcome!</h2>
-                <p style="font-size: 1.1rem; color: #666;">
-                    {"Ask me anything about NBA rules, regulations, and gameplay." if st.session_state.mode == "rulebook" 
+            <div style="text-align:center;padding:2rem;">
+                <h2 style="color:{theme['primary_color']};">{theme['icon']} Welcome!</h2>
+                <p style="font-size:1.1rem;">
+                    {"Ask me anything about NBA rules, regulations, and gameplay."
+                     if st.session_state.mode == "rulebook"
                      else "Ask me about NBA contracts, salary cap, and league business rules."}
                 </p>
-            </div>
-            """, unsafe_allow_html=True)
-            
-            st.markdown("### 🎯 Example Questions:")
-            
-            example_col1, example_col2 = st.columns(2)
-            
-            for i, example in enumerate(theme["examples"]):
-                with example_col1 if i % 2 == 0 else example_col2:
-                    st.info(f"{theme['icon']} {example}")
-            
+            </div>""", unsafe_allow_html=True)
+
+            st.markdown("### 🎯 Example Questions — click to ask:")
+            ex1, ex2 = st.columns(2)
+            for i, ex in enumerate(theme["examples"]):
+                with (ex1 if i % 2 == 0 else ex2):
+                    if st.button(f"{theme['icon']} {ex}", key=f"ex_{i}", use_container_width=True):
+                        st.session_state.pending_prompt = ex
+                        st.rerun()
+
             st.markdown("---")
-            st.markdown("**💡 Tip:** Type your question in the chat box below to get started!")
-    
-    # Display chat messages
+            st.markdown("**💡 Tip:** Click an example above or type your question in the box below!")
+
+    # ──────────────────────────────────────────
+    # CHAT HISTORY
+    # ──────────────────────────────────────────
     else:
-        for message in st.session_state.messages:
-            with st.chat_message(message["role"]):
-                # Escape dollar signs to prevent LaTeX rendering
-                content_display = message["content"].replace('$', r'\$')
-                st.markdown(content_display)
-                
-                # Display citations if available
-                if message["role"] == "assistant" and "citations" in message and message["citations"]:
-                    st.markdown("---")
-                    st.markdown(f"### 📚 Sources from {theme['name'].split()[1]}")
-                    
-                    for i, citation in enumerate(message["citations"], 1):
-                        content = citation.get('content', 'No content available')
-                        metadata = citation.get('metadata', {})
-                        
-                        # Extract location from metadata
-                        rule_location = None
-                        location_parts = []
-                        
-                        # Common metadata keys
-                        for key in ['rule', 'section', 'article', 'part', 'subsection', 'page']:
-                            if key in metadata:
-                                location_parts.append(f"{key.title()} {metadata[key]}")
-                        
-                        if location_parts:
-                            rule_location = ", ".join(location_parts)
-                        
-                        # Show location badge if available
-                        if rule_location:
-                            st.markdown(f'<div class="rule-location">📍 {rule_location}</div>', unsafe_allow_html=True)
-                        
-                        # Note: retrieve_and_generate API doesn't return relevance scores
-                        # If you need scores, use the retrieve API separately
-                        
-                        # Show preview
-                        preview = content[:200] + "..." if len(content) > 200 else content
-                        # Escape dollar signs for HTML display
-                        preview_display = preview.replace('$', r'\$')
-                        
-                        st.markdown(f"""
-                        <div class="source-excerpt">
-                            {preview_display}
-                        </div>
-                        """, unsafe_allow_html=True)
-                        
-                        # Add expander for full text if content is long
-                        if len(content) > 200:
-                            with st.expander("📖 Read full excerpt"):
-                                # Escape dollar signs for markdown display
-                                content_display = content.replace('$', r'\$')
-                                st.markdown(f"_{content_display}_")
-                        
-                        st.markdown("")  # Spacing
-    
-    # Chat input
-    placeholder_text = "Ask a question about NBA rules..." if st.session_state.mode == "rulebook" else "Ask about contracts, salary cap, or CBA rules..."
-    
-    if prompt := st.chat_input(placeholder_text):
-        # Add user message to chat history
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        
-        # Display user message
+        for msg in st.session_state.messages:
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"].replace("$", r"\$"))
+
+                # Timestamp
+                if msg.get("timestamp"):
+                    st.markdown(f'<div class="msg-ts">🕐 {msg["timestamp"]}</div>', unsafe_allow_html=True)
+
+                if msg["role"] == "assistant":
+                    # Copy response
+                    with st.expander("📋 Copy response"):
+                        st.code(msg["content"], language=None)
+
+                    # Citations
+                    if msg.get("citations"):
+                        st.markdown("---")
+                        st.markdown("### 📚 Sources")
+                        render_citations(msg["citations"], st.session_state.mode)
+
+                    # Cross-mode suggestion (stored at render time)
+                    if msg.get("cross_mode"):
+                        other = msg["cross_mode"]
+                        ot    = THEMES[other]
+                        st.markdown(
+                            f'<div class="cross-mode-box">💡 <strong>Did you know?</strong> '
+                            f"This topic also has implications in <strong>{ot['name']}</strong>. "
+                            f"Switch modes to explore further!</div>",
+                            unsafe_allow_html=True,
+                        )
+                        if st.button(f"Switch to {ot['name']} →", key=f"sw_{msg.get('timestamp',id(msg))}"):
+                            st.session_state.mode     = other
+                            st.session_state.messages = []
+                            st.session_state.session_ids[other] = None
+                            st.rerun()
+
+    # ──────────────────────────────────────────
+    # CHAT INPUT
+    # ──────────────────────────────────────────
+    placeholder = (
+        "Ask a question about NBA rules…"
+        if st.session_state.mode == "rulebook"
+        else "Ask about contracts, salary cap, or CBA rules…"
+    )
+
+    typed_prompt = st.chat_input(placeholder)
+
+    # Resolve prompt (typed input wins; fallback to pending)
+    prompt = typed_prompt
+    if not prompt and st.session_state.pending_prompt:
+        prompt = st.session_state.pending_prompt
+        st.session_state.pending_prompt = None
+
+    if prompt:
+        ts = datetime.now().strftime("%b %d, %I:%M %p")
+        st.session_state.messages.append({"role": "user", "content": prompt, "timestamp": ts})
+
         with st.chat_message("user"):
-            prompt_display = prompt.replace('$', r'\$')
-            st.markdown(prompt_display)
-        
-        # Get response from knowledge base
+            st.markdown(prompt.replace("$", r"\$"))
+            st.markdown(f'<div class="msg-ts">🕐 {ts}</div>', unsafe_allow_html=True)
+
         with st.chat_message("assistant"):
-            with st.spinner(f"{theme['icon']} Searching..."):
-                # Get the current session ID for this mode
-                current_session_id = st.session_state.session_ids.get(st.session_state.mode)
-                
-                # Query with conversation memory
-                response, citations, new_session_id = query_knowledge_base(
-                    prompt, 
-                    kb_id, 
-                    model_arn, 
-                    st.session_state.mode,
-                    session_id=current_session_id
+            with st.spinner(f"{theme['icon']} Searching…"):
+                cur_session = st.session_state.session_ids.get(st.session_state.mode)
+                response, citations, new_session = query_knowledge_base(
+                    prompt, kb_id, model_arn, st.session_state.mode, session_id=cur_session
                 )
-                
-                # Store the session ID for future queries in this mode
-                st.session_state.session_ids[st.session_state.mode] = new_session_id
-            
-            # Escape dollar signs to prevent LaTeX rendering issues
-            response_display = response.replace('$', r'\$')
-            st.markdown(response_display)
-            
-            # Display citations
+                st.session_state.session_ids[st.session_state.mode] = new_session
+
+            resp_ts = datetime.now().strftime("%b %d, %I:%M %p")
+            st.markdown(response.replace("$", r"\$"))
+            st.markdown(f'<div class="msg-ts">🕐 {resp_ts}</div>', unsafe_allow_html=True)
+
+            # Copy response
+            with st.expander("📋 Copy response"):
+                st.code(response, language=None)
+
+            # Citations
             if citations:
                 st.markdown("---")
-                st.markdown(f"### 📚 Sources from {theme['name'].split()[1]}")
-                
-                for i, citation in enumerate(citations, 1):
-                    content = citation.get('content', 'No content available')
-                    metadata = citation.get('metadata', {})
-                    
-                    # Extract location from metadata
-                    rule_location = None
-                    location_parts = []
-                    
-                    for key in ['rule', 'section', 'article', 'part', 'subsection', 'page']:
-                        if key in metadata:
-                            location_parts.append(f"{key.title()} {metadata[key]}")
-                    
-                    if location_parts:
-                        rule_location = ", ".join(location_parts)
-                    
-                    if rule_location:
-                        st.markdown(f'<div class="rule-location">📍 {rule_location}</div>', unsafe_allow_html=True)
-                    
-                    # Note: retrieve_and_generate API doesn't return relevance scores
-                    # If you need scores, use the retrieve API separately
-                    
-                    preview = content[:200] + "..." if len(content) > 200 else content
-                    # Escape dollar signs for HTML display
-                    preview_display = preview.replace('$', r'\$')
-                    
-                    st.markdown(f"""
-                    <div class="source-excerpt">
-                        {preview_display}
-                    </div>
-                    """, unsafe_allow_html=True)
-                    
-                    if len(content) > 200:
-                        with st.expander("📖 Read full excerpt"):
-                            # Escape dollar signs for markdown display
-                            content_display = content.replace('$', r'\$')
-                            st.markdown(f"_{content_display}_")
-                    
-                    st.markdown("")
-        
-        # Add assistant response to chat history
+                st.markdown("### 📚 Sources")
+                render_citations(citations, st.session_state.mode)
+
+            # Cross-mode detection & suggestion
+            cross = detect_cross_mode(response, st.session_state.mode)
+            if cross:
+                ot = THEMES[cross]
+                st.markdown(
+                    f'<div class="cross-mode-box">💡 <strong>Did you know?</strong> '
+                    f"This topic also has implications in <strong>{ot['name']}</strong>. "
+                    f"Switch modes to explore further!</div>",
+                    unsafe_allow_html=True,
+                )
+                if st.button(f"Switch to {ot['name']} →", key=f"switch_new_{resp_ts}"):
+                    st.session_state.mode     = cross
+                    st.session_state.messages = []
+                    st.session_state.session_ids[cross] = None
+                    st.rerun()
+
+        # Store assistant message
         st.session_state.messages.append({
-            "role": "assistant",
-            "content": response,
-            "citations": citations
+            "role":       "assistant",
+            "content":    response,
+            "citations":  citations,
+            "timestamp":  resp_ts,
+            "cross_mode": cross,
         })
+
 
 if __name__ == "__main__":
     main()
