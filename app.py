@@ -504,6 +504,75 @@ def _extract_citations(response: dict) -> list:
     return unique
 
 
+# ─────────────────────────────────────────────
+# CITATION RELEVANCE FILTER
+# ─────────────────────────────────────────────
+# Words that carry no signal for relevance matching
+_STOPWORDS = {
+    "a","an","the","is","are","was","were","be","been","being","have","has","had",
+    "do","does","did","will","would","could","should","may","might","shall","can",
+    "not","no","nor","so","yet","both","either","neither","each","few","more",
+    "most","other","some","such","than","then","that","this","these","those",
+    "what","which","who","whom","how","when","where","why","and","but","or","for",
+    "in","on","at","to","of","with","by","from","as","into","through","during",
+    "between","about","against","before","after","above","below","up","down","out",
+    "off","over","under","again","further","once","any","all","both","there","here",
+    "if","its","it","it's","them","they","their","our","us","we","you","your","i",
+    "he","she","his","her","him","my","me","rules","rule","nba","shall","player",
+    "team","game","ball","court","play","players","teams",
+}
+
+def _score_citation(citation: dict, question: str, response: str) -> float:
+    """
+    Score a citation's relevance.
+    Combines:
+      - keyword overlap between citation text and the question
+      - keyword overlap between citation text and the model's response
+    Returns a float 0-1.  Higher = more relevant.
+    """
+    def keywords(text: str) -> set:
+        tokens = re.findall(r"[a-z]+", text.lower())
+        return {t for t in tokens if t not in _STOPWORDS and len(t) > 2}
+
+    cit_kw  = keywords(citation.get("content", ""))
+    q_kw    = keywords(question)
+    resp_kw = keywords(response)
+
+    if not cit_kw:
+        return 0.0
+
+    q_overlap    = len(cit_kw & q_kw)    / max(len(q_kw),    1)
+    resp_overlap = len(cit_kw & resp_kw) / max(len(resp_kw), 1)
+
+    # Weight question overlap higher — it's the gold standard
+    return 0.6 * q_overlap + 0.4 * resp_overlap
+
+
+def filter_relevant_citations(citations: list, question: str, response: str,
+                               min_score: float = 0.08, max_sources: int = 4) -> list:
+    """
+    Keep only citations that are meaningfully relevant to the question and response.
+    Always returns at least 1 citation (the highest scorer) so the user isn't left
+    with an empty sources section.
+    """
+    if not citations:
+        return []
+
+    scored = [
+        (c, _score_citation(c, question, response))
+        for c in citations
+    ]
+    scored.sort(key=lambda x: x[1], reverse=True)
+
+    # Always keep the top result; then filter the rest by threshold
+    kept = [scored[0][0]]
+    for c, score in scored[1:]:
+        if score >= min_score and len(kept) < max_sources:
+            kept.append(c)
+
+    return kept
+
+
 def query_knowledge_base(question: str, knowledge_base_id: str, model_arn: str,
                           mode: str = "rulebook", session_id: str = None):
     """Query Bedrock Knowledge Base. Returns (response_text, citations, session_id)."""
@@ -569,6 +638,7 @@ Answer:"""
         new_session_id    = resp.get("sessionId", session_id)
         generated_text    = resp["output"]["text"]
         citations         = _extract_citations(resp)
+        citations         = filter_relevant_citations(citations, question, generated_text)
         return generated_text, citations, new_session_id
 
     except ClientError as e:
@@ -584,7 +654,9 @@ Answer:"""
             try:
                 resp           = client.retrieve_and_generate(**params)
                 new_session_id = resp.get("sessionId")
-                return resp["output"]["text"], _extract_citations(resp), new_session_id
+                gen_text       = resp["output"]["text"]
+                cits           = filter_relevant_citations(_extract_citations(resp), question, gen_text)
+                return gen_text, cits, new_session_id
             except Exception as retry_err:
                 return f"Retry failed: {retry_err}", [], None
 
