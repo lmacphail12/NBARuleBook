@@ -408,20 +408,13 @@ def render_citations(citations: list, mode: str):
     if not citations:
         return
 
-    # ── Deduplicate by content fingerprint (URI alone can vary per chunk suffix) ──
+    # ── Safety-net dedup (primary dedup happens in _extract_citations) ──
     seen, unique = set(), []
     for c in citations:
-        # Use first 120 chars of content as fingerprint — catches same text cited twice
-        fingerprint = c.get("content", "")[:120].strip()
-        if fingerprint and fingerprint not in seen:
-            seen.add(fingerprint)
+        fp = c.get("content", "").strip()[:150]
+        if fp not in seen:
+            seen.add(fp)
             unique.append(c)
-        elif not fingerprint:
-            # Fallback to URI if content is empty
-            uri = c.get("uri", "")
-            if uri not in seen:
-                seen.add(uri)
-                unique.append(c)
 
     # ── Confidence indicator ──
     conf_label, conf_color = get_confidence(unique)
@@ -478,16 +471,37 @@ def render_citations(citations: list, mode: str):
 # KNOWLEDGE BASE QUERY
 # ─────────────────────────────────────────────
 def _extract_citations(response: dict) -> list:
-    citations = []
+    """Extract and deduplicate citations at source so stored messages are already clean."""
+    raw = []
     for cit in response.get("citations", []):
         for ref in cit.get("retrievedReferences", []):
             s3 = ref.get("location", {}).get("s3Location", {})
-            citations.append({
-                "content":  ref.get("content", {}).get("text", "No content available"),
+            raw.append({
+                "content":  ref.get("content", {}).get("text", ""),
                 "uri":      s3.get("uri", "Unknown source"),
                 "metadata": ref.get("metadata", {}),
             })
-    return citations
+
+    # Deduplicate: primary key = first 150 chars of content; secondary = base URI (no fragment)
+    seen_content, seen_uri, unique = set(), set(), []
+    for c in raw:
+        text        = c["content"].strip()
+        fingerprint = text[:150]
+        base_uri    = c["uri"].split("#")[0]          # strip chunk fragment e.g. #chunk-3
+
+        if fingerprint and fingerprint in seen_content:
+            continue
+        if not fingerprint and base_uri in seen_uri:
+            continue
+
+        seen_content.add(fingerprint)
+        seen_uri.add(base_uri)
+        # Normalise empty content
+        if not text:
+            c["content"] = "No content available"
+        unique.append(c)
+
+    return unique
 
 
 def query_knowledge_base(question: str, knowledge_base_id: str, model_arn: str,
@@ -996,14 +1010,24 @@ def main():
             st.markdown(prompt.replace("$", r"\$"))
             st.markdown(f'<div class="msg-ts">🕐 {ts}</div>', unsafe_allow_html=True)
 
-        with st.chat_message("assistant"):
-            with st.spinner(f"{theme['icon']} Searching…"):
-                cur_session = st.session_state.session_ids.get(st.session_state.mode)
-                response, citations, new_session = query_knowledge_base(
-                    prompt, kb_id, model_arn, st.session_state.mode, session_id=cur_session
-                )
-                st.session_state.session_ids[st.session_state.mode] = new_session
+        # ── Visible status bar while the model runs ──────────────────────────────
+        status_label = (
+            "🏀 Searching the NBA Rulebook…"
+            if st.session_state.mode == "rulebook"
+            else "💰 Searching the CBA & Salary Cap docs…"
+        )
+        with st.status(status_label, expanded=True) as status:
+            st.write("Retrieving relevant sections…")
+            cur_session = st.session_state.session_ids.get(st.session_state.mode)
+            response, citations, new_session = query_knowledge_base(
+                prompt, kb_id, model_arn, st.session_state.mode, session_id=cur_session
+            )
+            st.session_state.session_ids[st.session_state.mode] = new_session
+            src_count = len(citations)
+            st.write(f"Generating answer from {src_count} source{'s' if src_count != 1 else ''}…")
+            status.update(label="✅ Done!", state="complete", expanded=False)
 
+        with st.chat_message("assistant"):
             resp_ts = datetime.now().strftime("%b %d, %I:%M %p")
             st.markdown(response.replace("$", r"\$"))
             st.markdown(f'<div class="msg-ts">🕐 {resp_ts}</div>', unsafe_allow_html=True)
