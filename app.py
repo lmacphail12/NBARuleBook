@@ -133,10 +133,6 @@ def init_session_state():
         "mode": "rulebook",
         "messages": [],
         "session_ids": {"rulebook": None, "cba": None},
-        "last_config": {
-            "rulebook": {"model": None, "kb_id": None},
-            "cba": {"model": None, "kb_id": None},
-        },
         "dark_mode": False,
         "pending_prompt": None,
         "current_quiz": None,
@@ -387,6 +383,23 @@ def get_bedrock_client():
         return None
 
 
+@st.cache_resource
+def get_bedrock_runtime_client():
+    """Direct model invocation client — used for quiz generation (no RAG needed)."""
+    try:
+        if "aws" in st.secrets:
+            return boto3.client(
+                service_name="bedrock-runtime",
+                aws_access_key_id=st.secrets["aws"]["access_key_id"],
+                aws_secret_access_key=st.secrets["aws"]["secret_access_key"],
+                region_name=st.secrets["aws"].get("region", "us-east-1"),
+            )
+        return None
+    except Exception as e:
+        st.error(f"⚠️ Error initialising Bedrock runtime client: {e}")
+        return None
+
+
 # ─────────────────────────────────────────────
 # CITATION RENDERING (single helper – no duplication)
 # ─────────────────────────────────────────────
@@ -561,13 +574,13 @@ QUIZ_TOPICS = {
     "cba":      ["Salary Cap", "Free Agency", "Trade Rules", "Contract Types", "Luxury Tax", "Waivers & Buyouts"],
 }
 
-def generate_quiz_question(kb_id: str, model_arn: str, mode: str, topic: str):
-    """Ask the KB to generate a multiple-choice quiz question."""
-    domain = "NBA rules" if mode == "rulebook" else "NBA CBA / salary cap rules"
-    quiz_prompt = f"""Generate a challenging but fair multiple-choice quiz question about {domain},
+def generate_quiz_question(mode: str, topic: str):
+    """Generate a multiple-choice quiz question via direct Claude invocation (no RAG)."""
+    domain = "NBA official rulebook" if mode == "rulebook" else "NBA Collective Bargaining Agreement (CBA) and salary cap rules"
+    quiz_prompt = f"""Generate a challenging but fair multiple-choice quiz question about the {domain},
 specifically on the topic of: {topic}.
 
-Reply in EXACTLY this format (no extra text):
+Reply in EXACTLY this format (no extra text, no preamble):
 QUESTION: [question text]
 A) [option]
 B) [option]
@@ -576,7 +589,26 @@ D) [option]
 ANSWER: [A, B, C, or D]
 EXPLANATION: [one or two sentences citing the specific rule or CBA article]"""
 
-    return query_knowledge_base(quiz_prompt, kb_id, model_arn, mode, session_id=None)
+    client = get_bedrock_runtime_client()
+    if not client:
+        return "Error: Could not initialise Bedrock runtime client.", [], None
+
+    try:
+        response = client.invoke_model(
+            modelId="us.anthropic.claude-haiku-4-5-20251001-v1:0",
+            contentType="application/json",
+            accept="application/json",
+            body=json.dumps({
+                "anthropic_version": "bedrock-2023-05-31",
+                "max_tokens": 512,
+                "messages": [{"role": "user", "content": quiz_prompt}],
+            }),
+        )
+        result = json.loads(response["body"].read())
+        text = result.get("content", [{}])[0].get("text", "")
+        return text, [], None
+    except Exception as e:
+        return f"Error generating quiz: {e}", [], None
 
 
 def parse_quiz(text: str):
@@ -661,35 +693,10 @@ def main():
         st.markdown("---")
 
         theme = THEMES[st.session_state.mode]
-        st.markdown(f"## {theme['icon']} Configuration")
 
-        kb_id = st.text_input(
-            "📊 Knowledge Base ID",
-            value=theme["kb_id"],
-            help="Your Bedrock Knowledge Base ID",
-        )
-
-        # Model selection
-        st.subheader("Model Settings")
-        model_options = {
-            "Claude Sonnet 4.5 ⭐ (Best)":    "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
-            "Claude Opus 4.1 (Most Powerful)": "us.anthropic.claude-opus-4-1-20250805-v1:0",
-            "Claude Sonnet 4":                 "us.anthropic.claude-sonnet-4-20250514-v1:0",
-            "Claude Haiku 4.5 (Fastest)":      "us.anthropic.claude-haiku-4-5-20251001-v1:0",
-            "Claude 3.5 Sonnet v2":            "us.anthropic.claude-3-5-sonnet-20241022-v2:0",
-            "Claude 3 Haiku":                  "us.anthropic.claude-3-haiku-20240307-v1:0",
-        }
-        default_model  = "Claude Sonnet 4.5 ⭐ (Best)" if st.session_state.mode == "cba" else "Claude Haiku 4.5 (Fastest)"
-        model_display  = st.selectbox("🤖 Claude Model", list(model_options.keys()),
-                                      index=list(model_options.keys()).index(default_model))
-        model_arn      = model_options[model_display]
-
-        # Detect config change → reset session
-        cur = st.session_state.mode
-        if (st.session_state.last_config[cur]["model"] != model_arn
-                or st.session_state.last_config[cur]["kb_id"] != kb_id):
-            st.session_state.session_ids[cur] = None
-            st.session_state.last_config[cur] = {"model": model_arn, "kb_id": kb_id}
+        # Hardcoded KB ID and model — derived from current mode
+        kb_id     = theme["kb_id"]
+        model_arn = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
 
         st.markdown("---")
 
@@ -769,7 +776,7 @@ def main():
             st.session_state.quiz_raw         = None
             st.session_state.show_quiz_answer = False
             with st.spinner("Generating quiz question…"):
-                raw_resp, _, _ = generate_quiz_question(kb_id, model_arn, st.session_state.mode, topic)
+                raw_resp, _, _ = generate_quiz_question(st.session_state.mode, topic)
                 parsed = parse_quiz(raw_resp)
                 if parsed:
                     st.session_state.current_quiz = parsed
