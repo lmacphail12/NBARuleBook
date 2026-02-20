@@ -696,7 +696,11 @@ def main():
 
         # Hardcoded KB ID and model — derived from current mode
         kb_id     = theme["kb_id"]
-        model_arn = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+        model_arn = (
+            "us.anthropic.claude-opus-4-20250514-v1:0"
+            if st.session_state.mode == "cba"
+            else "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+        )
 
         st.markdown("---")
 
