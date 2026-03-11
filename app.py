@@ -3,6 +3,7 @@ import boto3
 import json
 import uuid
 import re
+import os
 from datetime import datetime
 from botocore.exceptions import ClientError
 
@@ -55,6 +56,13 @@ THEMES = {
         ],
     },
 }
+
+MODE_KEYS = tuple(THEMES.keys())
+DEFAULT_MODEL_ARNS = {
+    "rulebook": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+    "cba": "us.anthropic.claude-opus-4-20250514-v1:0",
+}
+DEFAULT_QUIZ_MODEL_ID = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 
 # ─────────────────────────────────────────────
 # CBA SOURCE IDENTIFICATION
@@ -128,20 +136,94 @@ def get_confidence(citations: list):
 # ─────────────────────────────────────────────
 # SESSION STATE INIT
 # ─────────────────────────────────────────────
+def _empty_quiz_state():
+    return {
+        "current": None,
+        "raw": None,
+        "show_answer": False,
+    }
+
+
 def init_session_state():
     defaults = {
         "mode": "rulebook",
-        "messages": [],
-        "session_ids": {"rulebook": None, "cba": None},
         "dark_mode": False,
-        "pending_prompt": None,
-        "current_quiz": None,
-        "quiz_raw": None,
-        "show_quiz_answer": False,
+        "session_ids": {mode: None for mode in MODE_KEYS},
     }
     for key, val in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = val
+
+    current_mode = st.session_state.mode
+
+    if "messages_by_mode" not in st.session_state:
+        legacy_messages = st.session_state.get("messages", [])
+        st.session_state.messages_by_mode = {
+            mode: list(legacy_messages) if mode == current_mode else []
+            for mode in MODE_KEYS
+        }
+    else:
+        for mode in MODE_KEYS:
+            st.session_state.messages_by_mode.setdefault(mode, [])
+
+    for mode in MODE_KEYS:
+        st.session_state.session_ids.setdefault(mode, None)
+
+    if "pending_prompts" not in st.session_state:
+        legacy_prompt = st.session_state.get("pending_prompt")
+        st.session_state.pending_prompts = {
+            mode: legacy_prompt if mode == current_mode else None
+            for mode in MODE_KEYS
+        }
+    else:
+        for mode in MODE_KEYS:
+            st.session_state.pending_prompts.setdefault(mode, None)
+
+    if "quiz_state" not in st.session_state:
+        st.session_state.quiz_state = {mode: _empty_quiz_state() for mode in MODE_KEYS}
+        if any(k in st.session_state for k in ("current_quiz", "quiz_raw", "show_quiz_answer")):
+            st.session_state.quiz_state[current_mode] = {
+                "current": st.session_state.get("current_quiz"),
+                "raw": st.session_state.get("quiz_raw"),
+                "show_answer": st.session_state.get("show_quiz_answer", False),
+            }
+    else:
+        for mode in MODE_KEYS:
+            st.session_state.quiz_state.setdefault(mode, _empty_quiz_state())
+
+    if "quiz_asked" not in st.session_state:
+        st.session_state.quiz_asked = {mode: {} for mode in MODE_KEYS}
+    else:
+        for mode in MODE_KEYS:
+            st.session_state.quiz_asked.setdefault(mode, {})
+
+
+def get_messages(mode: str = None):
+    mode = mode or st.session_state.mode
+    return st.session_state.messages_by_mode[mode]
+
+
+def get_quiz_state(mode: str = None):
+    mode = mode or st.session_state.mode
+    return st.session_state.quiz_state[mode]
+
+
+def reset_quiz_state(mode: str = None):
+    mode = mode or st.session_state.mode
+    st.session_state.quiz_state[mode] = _empty_quiz_state()
+
+
+def get_quiz_history(mode: str, topic: str):
+    topic_history = st.session_state.quiz_asked.setdefault(mode, {})
+    return topic_history.setdefault(topic, [])
+
+
+def clear_mode_state(mode: str):
+    st.session_state.messages_by_mode[mode] = []
+    st.session_state.session_ids[mode] = None
+    st.session_state.pending_prompts[mode] = None
+    st.session_state.quiz_asked[mode] = {}
+    reset_quiz_state(mode)
 
 init_session_state()
 
@@ -426,45 +508,98 @@ window.addEventListener('load',()=>{
 
 
 # ─────────────────────────────────────────────
+# RUNTIME CONFIG
+# ─────────────────────────────────────────────
+def _secret_section(name: str):
+    return st.secrets[name] if name in st.secrets else {}
+
+
+def _section_get(section, key: str, default=None):
+    try:
+        if key in section:
+            return section[key]
+    except TypeError:
+        return default
+    return default
+
+
+def _secret_value(key: str, default=None):
+    return st.secrets[key] if key in st.secrets else default
+
+
+def get_aws_region():
+    aws = _secret_section("aws")
+    return (
+        _section_get(aws, "region")
+        or os.getenv("AWS_REGION")
+        or os.getenv("AWS_DEFAULT_REGION")
+        or "us-east-1"
+    )
+
+
+def get_mode_runtime_config(mode: str) -> dict:
+    theme = THEMES[mode]
+    knowledge_bases = _secret_section("knowledge_bases")
+    models = _secret_section("models")
+    kb_secret_key = "knowledge_base_id" if mode == "rulebook" else "cba_knowledge_base_id"
+    kb_env_key = "RULEBOOK_KB_ID" if mode == "rulebook" else "CBA_KB_ID"
+    model_env_key = "RULEBOOK_MODEL_ARN" if mode == "rulebook" else "CBA_MODEL_ARN"
+
+    return {
+        "kb_id": (
+            _section_get(knowledge_bases, f"{mode}_id")
+            or _secret_value(kb_secret_key)
+            or os.getenv(kb_env_key)
+            or theme["kb_id"]
+        ),
+        "model_arn": (
+            _section_get(models, f"{mode}_model_arn")
+            or _secret_value(f"{mode}_model_arn")
+            or os.getenv(model_env_key)
+            or DEFAULT_MODEL_ARNS[mode]
+        ),
+        "quiz_model_id": (
+            _section_get(models, "quiz_model_id")
+            or _secret_value("quiz_model_id")
+            or os.getenv("QUIZ_MODEL_ID")
+            or DEFAULT_QUIZ_MODEL_ID
+        ),
+        "region": get_aws_region(),
+    }
+
+
+def get_boto_client_kwargs(region_name: str = None) -> dict:
+    aws = _secret_section("aws")
+    region = region_name or get_aws_region()
+    access_key = _section_get(aws, "access_key_id")
+    secret_key = _section_get(aws, "secret_access_key")
+    session_token = _section_get(aws, "session_token")
+
+    kwargs = {"region_name": region}
+    if access_key and secret_key:
+        kwargs["aws_access_key_id"] = access_key
+        kwargs["aws_secret_access_key"] = secret_key
+        if session_token:
+            kwargs["aws_session_token"] = session_token
+    return kwargs
+
+
+# ─────────────────────────────────────────────
 # AWS BEDROCK CLIENT
 # ─────────────────────────────────────────────
 @st.cache_resource
-def get_bedrock_client():
+def get_bedrock_client(service_name: str, region_name: str = None):
     try:
-        if "aws" in st.secrets:
-            missing = [k for k in ["access_key_id", "secret_access_key"] if k not in st.secrets["aws"]]
-            if missing:
-                st.error(f"⚠️ Missing secret keys: {', '.join(missing)}")
-                return None
-            return boto3.client(
-                service_name="bedrock-agent-runtime",
-                aws_access_key_id=st.secrets["aws"]["access_key_id"],
-                aws_secret_access_key=st.secrets["aws"]["secret_access_key"],
-                region_name=st.secrets["aws"].get("region", "us-east-1"),
-            )
-        else:
-            st.error("⚠️ No AWS credentials found in secrets!")
-            return None
+        return boto3.client(service_name=service_name, **get_boto_client_kwargs(region_name))
     except Exception as e:
-        st.error(f"⚠️ Error initialising Bedrock client: {e}")
+        st.error(f"⚠️ Error initialising {service_name} client: {e}")
         return None
 
 
 @st.cache_resource
-def get_bedrock_runtime_client():
+def get_bedrock_runtime_client(region_name: str = None):
     """Direct model invocation client — used for quiz generation (no RAG needed)."""
-    try:
-        if "aws" in st.secrets:
-            return boto3.client(
-                service_name="bedrock-runtime",
-                aws_access_key_id=st.secrets["aws"]["access_key_id"],
-                aws_secret_access_key=st.secrets["aws"]["secret_access_key"],
-                region_name=st.secrets["aws"].get("region", "us-east-1"),
-            )
-        return None
-    except Exception as e:
-        st.error(f"⚠️ Error initialising Bedrock runtime client: {e}")
-        return None
+    return get_bedrock_client("bedrock-runtime", region_name)
 
 
 # ─────────────────────────────────────────────
@@ -589,51 +724,56 @@ _STOPWORDS = {
     "team","game","ball","court","play","players","teams",
 }
 
-def _score_citation(citation: dict, question: str, response: str) -> float:
+def _score_citation(citation: dict, question: str) -> float:
     """
     Score a citation's relevance.
-    Combines:
-      - keyword overlap between citation text and the question
-      - keyword overlap between citation text and the model's response
+    Uses keyword overlap between the citation and the user's question.
     Returns a float 0-1.  Higher = more relevant.
     """
     def keywords(text: str) -> set:
         tokens = re.findall(r"[a-z]+", text.lower())
         return {t for t in tokens if t not in _STOPWORDS and len(t) > 2}
 
-    cit_kw  = keywords(citation.get("content", ""))
-    q_kw    = keywords(question)
-    resp_kw = keywords(response)
+    q_kw = keywords(question)
+    if not q_kw:
+        return 0.0
+
+    metadata = " ".join(f"{k} {v}" for k, v in citation.get("metadata", {}).items())
+    cit_kw = keywords(f"{citation.get('content', '')} {metadata} {citation.get('uri', '')}")
 
     if not cit_kw:
         return 0.0
 
-    q_overlap    = len(cit_kw & q_kw)    / max(len(q_kw),    1)
-    resp_overlap = len(cit_kw & resp_kw) / max(len(resp_kw), 1)
+    overlap_score = len(cit_kw & q_kw) / len(q_kw)
+    phrase_bonus = 0.0
 
-    # Weight question overlap higher — it's the gold standard
-    return 0.6 * q_overlap + 0.4 * resp_overlap
+    question_lower = question.lower()
+    content_lower = citation.get("content", "").lower()
+    uri_lower = citation.get("uri", "").lower()
+    for phrase in re.findall(r"[a-z]+(?:\s+[a-z]+)+", question_lower):
+        if len(phrase.split()) >= 2 and (phrase in content_lower or phrase in uri_lower):
+            phrase_bonus = max(phrase_bonus, 0.15)
+
+    return min(overlap_score + phrase_bonus, 1.0)
 
 
-def filter_relevant_citations(citations: list, question: str, response: str,
+def filter_relevant_citations(citations: list, question: str,
                                min_score: float = 0.08, max_sources: int = 4) -> list:
     """
-    Keep only citations that are meaningfully relevant to the question and response.
-    Always returns at least 1 citation (the highest scorer) so the user isn't left
-    with an empty sources section.
+    Keep only citations that are meaningfully relevant to the user's question.
+    Returns an empty list when no citation clears the relevance threshold.
     """
     if not citations:
         return []
 
     scored = [
-        (c, _score_citation(c, question, response))
+        (c, _score_citation(c, question))
         for c in citations
     ]
     scored.sort(key=lambda x: x[1], reverse=True)
 
-    # Always keep the top result; then filter the rest by threshold
-    kept = [scored[0][0]]
-    for c, score in scored[1:]:
+    kept = []
+    for c, score in scored:
         if score >= min_score and len(kept) < max_sources:
             kept.append(c)
 
@@ -641,9 +781,10 @@ def filter_relevant_citations(citations: list, question: str, response: str,
 
 
 def query_knowledge_base(question: str, knowledge_base_id: str, model_arn: str,
-                          mode: str = "rulebook", session_id: str = None):
+                          mode: str = "rulebook", session_id: str = None,
+                          region_name: str = None):
     """Query Bedrock Knowledge Base. Returns (response_text, citations, session_id)."""
-    client = get_bedrock_client()
+    client = get_bedrock_client("bedrock-agent-runtime", region_name)
     if not client:
         return "Error: Could not initialise Bedrock client.", [], None
 
@@ -652,38 +793,40 @@ def query_knowledge_base(question: str, knowledge_base_id: str, model_arn: str,
 
     if mode == "rulebook":
         prompt = f"""You are an expert NBA rules analyst with deep knowledge of basketball regulations.
-Use the rulebook sources provided to answer the following question.
+Use only the retrieved rulebook sources provided by the knowledge base to answer the following question.
 
 Question: {question}
 
 Instructions:
-1. ALWAYS synthesize an answer — even if no single rule directly addresses the question,
-   combine definitions, examples, and related sections to construct a clear response.
-   Never say the rulebook "does not directly address" something if related sections exist.
-2. For questions comparing two concepts (e.g., fouls vs. violations), find the definitions
-   and examples of each in the sources and explain the distinction clearly.
-3. Combine multiple rules when needed — identify each relevant rule first, then explain
-   how they connect.
-4. For scenario / "what if" questions, reason step-by-step through the applicable rules.
-5. Always cite specific rules (e.g., "According to Rule 12, Section II…").
-6. Be confident in logical inferences — if the answer logically follows from the rules
-   provided, state it as the answer.
-7. Reference prior conversation context when answering follow-ups.
+1. Base the answer on retrieved sources and prior conversation context only when that context remains consistent with the sources.
+2. If the retrieved material does not directly resolve the question, say that plainly and point to the closest relevant rule instead of guessing.
+3. Separate direct support from any careful inference by using these headings exactly:
+   Answer:
+   Direct source support:
+   Careful inference (if any):
+4. For comparisons or scenarios, reason step by step from the cited rules and note any ambiguity that remains.
+5. Cite specific rules and sections only when they are supported by the retrieved material.
+6. Do not invent rule numbers, article numbers, penalties, dollar figures, or procedures.
 
 Answer:"""
     else:
         prompt = f"""You are an expert on the NBA Collective Bargaining Agreement (CBA) and the NBA
-Basketball Operations Manual. Use the sources provided to answer the following question.
+Basketball Operations Manual. Use only the retrieved sources provided by the knowledge base to answer the following question.
 
 Question: {question}
 
 Instructions:
-1. Explicitly note when information comes from the CBA versus the Operations Manual.
-2. Explain how multiple CBA articles or salary-cap rules interact when relevant.
-3. Cite specific CBA articles or Operations Manual sections.
-4. Translate complex financial terms into plain language.
-5. Include relevant dollar figures or percentages where applicable.
-6. Reference prior conversation context when answering follow-ups.
+1. Base the answer on retrieved sources and prior conversation context only when that context remains consistent with the sources.
+2. Explicitly note when information comes from the CBA versus the Operations Manual.
+3. If the retrieved material does not directly resolve the question, say that plainly and point to the closest relevant article or section instead of guessing.
+4. Use these headings exactly:
+   Answer:
+   Direct source support:
+   Careful inference (if any):
+5. Explain how multiple CBA articles or salary-cap rules interact when relevant, but distinguish direct support from inference.
+6. Cite specific CBA articles or Operations Manual sections only when supported by the retrieved material.
+7. Do not invent article numbers, salary figures, percentages, or procedural details.
+8. Translate complex financial terms into plain language.
 
 Answer:"""
 
@@ -705,7 +848,7 @@ Answer:"""
         new_session_id    = resp.get("sessionId", session_id)
         generated_text    = resp["output"]["text"]
         citations         = _extract_citations(resp)
-        citations         = filter_relevant_citations(citations, question, generated_text)
+        citations         = filter_relevant_citations(citations, question)
         return generated_text, citations, new_session_id
 
     except ClientError as e:
@@ -722,7 +865,7 @@ Answer:"""
                 resp           = client.retrieve_and_generate(**params)
                 new_session_id = resp.get("sessionId")
                 gen_text       = resp["output"]["text"]
-                cits           = filter_relevant_citations(_extract_citations(resp), question, gen_text)
+                cits           = filter_relevant_citations(_extract_citations(resp), question)
                 return gen_text, cits, new_session_id
             except Exception as retry_err:
                 return f"Retry failed: {retry_err}", [], None
@@ -771,7 +914,8 @@ _QUESTION_TYPES = [
 
 import random as _random
 
-def generate_quiz_question(mode: str, topic: str, kb_id: str):
+def generate_quiz_question(mode: str, topic: str, kb_id: str, quiz_model_id: str,
+                           region_name: str = None):
     """
     Generate a grounded, varied multiple-choice quiz question.
     - Randomises the retrieval sub-query so different source chunks are fetched each call.
@@ -779,8 +923,8 @@ def generate_quiz_question(mode: str, topic: str, kb_id: str):
     - Rotates question type so consecutive questions feel different.
     - Passes previously asked questions to Claude so it avoids repeating them.
     """
-    rag_client     = get_bedrock_client()
-    runtime_client = get_bedrock_runtime_client()
+    rag_client     = get_bedrock_client("bedrock-agent-runtime", region_name)
+    runtime_client = get_bedrock_runtime_client(region_name)
     if not rag_client or not runtime_client:
         return "Error: Could not initialise Bedrock clients.", [], None
 
@@ -797,23 +941,45 @@ def generate_quiz_question(mode: str, topic: str, kb_id: str):
             retrievalQuery={"text": retrieval_query},
             retrievalConfiguration={"vectorSearchConfiguration": {"numberOfResults": 10}},
         )
-        all_chunks = [
-            r.get("content", {}).get("text", "")
-            for r in retrieval_resp.get("retrievalResults", [])
-            if r.get("content", {}).get("text", "").strip()
-        ]
-        # Randomly sample up to 4 chunks so the source material varies each call
-        sampled = _random.sample(all_chunks, min(4, len(all_chunks))) if all_chunks else []
-        source_text = "\n\n---\n\n".join(sampled)
-    except Exception:
-        source_text = ""
+        all_chunks = []
+        seen_chunks = set()
+        for result in retrieval_resp.get("retrievalResults", []):
+            chunk_text = result.get("content", {}).get("text", "").strip()
+            if not chunk_text:
+                continue
+            fingerprint = chunk_text[:180]
+            if fingerprint in seen_chunks:
+                continue
+            seen_chunks.add(fingerprint)
+
+            metadata = result.get("metadata", {})
+            location_parts = [
+                f"{label.title()} {metadata[label]}"
+                for label in ["rule", "section", "article", "part", "page"]
+                if label in metadata
+            ]
+            if location_parts:
+                all_chunks.append(f"[{' | '.join(location_parts)}]\n{chunk_text}")
+            else:
+                all_chunks.append(chunk_text)
+    except Exception as e:
+        return f"Quiz unavailable right now because source retrieval failed: {e}", [], None
+
+    if len(all_chunks) < 2:
+        return (
+            "Quiz unavailable because the knowledge base did not return enough grounded source excerpts "
+            f"for '{topic}'. Please try another topic or ask a direct question instead."
+        ), [], None
+
+    # Randomly sample up to 4 chunks so the source material varies each call
+    sampled = _random.sample(all_chunks, min(4, len(all_chunks)))
+    source_text = "\n\n---\n\n".join(sampled)
 
     # ── Pick a random question type ──────────────────────────────────────────
     q_type = _random.choice(_QUESTION_TYPES)
 
     # ── Build the "avoid repeating" block from session history ───────────────
-    asked_key   = f"quiz_asked_{mode}_{topic}"
-    asked_so_far = st.session_state.get(asked_key, [])
+    asked_so_far = get_quiz_history(mode, topic)
     avoid_block  = ""
     if asked_so_far:
         bullets = "\n".join(f"  - {q}" for q in asked_so_far[-8:])
@@ -829,8 +995,6 @@ Your question MUST cover a different specific rule, number, scenario, or term.
         f"Use ONLY the following source excerpts from the {domain}.\n"
         f"Do not use information outside these excerpts.\n\n"
         f"SOURCE EXCERPTS:\n{source_text}\n\n"
-        if source_text
-        else f"Use your knowledge of the {domain}.\n\n"
     )
 
     quiz_prompt = f"""{context_block}Generate one multiple-choice quiz question about: {topic}.
@@ -854,7 +1018,7 @@ EXPLANATION: [one or two sentences citing the specific rule, article, or section
 
     try:
         response = runtime_client.invoke_model(
-            modelId="us.anthropic.claude-haiku-4-5-20251001-v1:0",
+            modelId=quiz_model_id,
             contentType="application/json",
             accept="application/json",
             body=json.dumps({
@@ -871,9 +1035,7 @@ EXPLANATION: [one or two sentences citing the specific rule, article, or section
         if len(parsed_check) > 1:
             q_text = parsed_check[1].split("\n")[0].strip()
             if q_text:
-                if asked_key not in st.session_state:
-                    st.session_state[asked_key] = []
-                st.session_state[asked_key].append(q_text)
+                asked_so_far.append(q_text)
 
         return text, [], None
     except Exception as e:
@@ -930,6 +1092,10 @@ def export_chat(messages: list, mode: str) -> str:
 # MAIN
 # ─────────────────────────────────────────────
 def main():
+    current_mode = st.session_state.mode
+    current_messages = get_messages(current_mode)
+    runtime_config = get_mode_runtime_config(current_mode)
+
     # ──────────────────────────────────────────
     # SIDEBAR
     # ──────────────────────────────────────────
@@ -948,34 +1114,25 @@ def main():
             "",
             options=["rulebook", "cba"],
             format_func=lambda x: THEMES[x]["name"],
-            index=list(THEMES.keys()).index(st.session_state.mode),
+            index=list(MODE_KEYS).index(current_mode),
             label_visibility="collapsed",
         )
-        if selected_mode != st.session_state.mode:
-            st.session_state.mode     = selected_mode
-            st.session_state.messages = []
-            st.session_state.session_ids[selected_mode] = None
-            st.session_state.current_quiz   = None
-            st.session_state.quiz_raw       = None
+        if selected_mode != current_mode:
+            st.session_state.mode = selected_mode
             st.rerun()
 
         st.markdown("---")
 
-        theme = THEMES[st.session_state.mode]
-
-        # Hardcoded KB ID and model — derived from current mode
-        kb_id     = theme["kb_id"]
-        model_arn = (
-            "us.anthropic.claude-opus-4-20250514-v1:0"
-            if st.session_state.mode == "cba"
-            else "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
-        )
+        theme = THEMES[current_mode]
+        kb_id = runtime_config["kb_id"]
+        model_arn = runtime_config["model_arn"]
+        quiz_model_id = runtime_config["quiz_model_id"]
 
         st.markdown("---")
 
         # Stats
         st.markdown("### 📊 Stats")
-        q_count = len([m for m in st.session_state.messages if m["role"] == "user"])
+        q_count = len([m for m in current_messages if m["role"] == "user"])
         st.markdown(f"""
         <div class="metric-card">
             <h2 style="font-size:2rem;">{theme['icon']} {q_count}</h2>
@@ -986,7 +1143,7 @@ def main():
 
         # Tips
         st.markdown("### 💡 Tips")
-        if st.session_state.mode == "rulebook":
+        if current_mode == "rulebook":
             st.markdown("""
 - Ask about specific rules by number
 - Ask follow-up questions (memory is on)
@@ -1008,23 +1165,20 @@ def main():
         c1, c2 = st.columns(2)
         with c1:
             if st.button("🗑️ Clear", use_container_width=True):
-                st.session_state.messages     = []
-                st.session_state.current_quiz = None
-                st.session_state.quiz_raw     = None
-                st.session_state.session_ids[st.session_state.mode] = None
+                clear_mode_state(current_mode)
                 st.rerun()
         with c2:
             if st.button("🔄 Refresh", use_container_width=True):
                 st.rerun()
 
         # Export
-        if st.session_state.messages:
-            md_export = export_chat(st.session_state.messages, st.session_state.mode)
+        if current_messages:
+            md_export = export_chat(current_messages, current_mode)
             ts_str    = datetime.now().strftime("%Y%m%d_%H%M")
             st.download_button(
                 label="📥 Export Chat",
                 data=md_export,
-                file_name=f"nba_{st.session_state.mode}_{ts_str}.md",
+                file_name=f"nba_{current_mode}_{ts_str}.md",
                 mime="text/markdown",
                 use_container_width=True,
             )
@@ -1032,7 +1186,7 @@ def main():
     # ──────────────────────────────────────────
     # HEADER
     # ──────────────────────────────────────────
-    theme = THEMES[st.session_state.mode]
+    theme = THEMES[current_mode]
     st.markdown(f'<h1>{theme["title"]}</h1>', unsafe_allow_html=True)
     st.markdown(f'<p class="subtitle">{theme["subtitle"]}</p>', unsafe_allow_html=True)
     st.markdown("---")
@@ -1041,22 +1195,27 @@ def main():
     # QUIZ ME
     # ──────────────────────────────────────────
     with st.expander("🎯 Quiz Me!", expanded=False):
-        topics = QUIZ_TOPICS[st.session_state.mode]
+        topics = QUIZ_TOPICS[current_mode]
         topic  = st.selectbox("Choose a topic:", topics, key="quiz_topic_select")
 
         if st.button("🎲 Generate Question", use_container_width=True, key="gen_quiz"):
-            st.session_state.current_quiz     = None
-            st.session_state.quiz_raw         = None
-            st.session_state.show_quiz_answer = False
+            reset_quiz_state(current_mode)
             with st.spinner("Generating quiz question…"):
-                raw_resp, _, _ = generate_quiz_question(st.session_state.mode, topic, kb_id)
+                raw_resp, _, _ = generate_quiz_question(
+                    current_mode,
+                    topic,
+                    kb_id,
+                    quiz_model_id,
+                    runtime_config["region"],
+                )
                 parsed = parse_quiz(raw_resp)
                 if parsed:
-                    st.session_state.current_quiz = parsed
+                    get_quiz_state(current_mode)["current"] = parsed
                 else:
-                    st.session_state.quiz_raw = raw_resp
+                    get_quiz_state(current_mode)["raw"] = raw_resp
 
-        quiz = st.session_state.current_quiz
+        quiz_state = get_quiz_state(current_mode)
+        quiz = quiz_state["current"]
         if quiz:
             st.markdown(f"**Q: {quiz['question']}**")
             user_ans = st.radio(
@@ -1066,9 +1225,9 @@ def main():
                 key=f"quiz_radio_{quiz['question'][:30]}",
             )
             if st.button("✅ Submit Answer", key="submit_quiz"):
-                st.session_state.show_quiz_answer = True
+                quiz_state["show_answer"] = True
 
-            if st.session_state.show_quiz_answer:
+            if quiz_state["show_answer"]:
                 correct = quiz["answer"].strip().upper()
                 if user_ans == correct:
                     st.success(f"🎉 Correct! The answer is **{correct}**.")
@@ -1077,14 +1236,19 @@ def main():
                 if quiz.get("explanation"):
                     st.info(f"📖 {quiz['explanation']}")
 
-        elif st.session_state.quiz_raw:
+        elif quiz_state["raw"]:
             # Structured parse failed – show raw response
-            st.markdown(st.session_state.quiz_raw)
+            if quiz_state["raw"].startswith("Quiz unavailable"):
+                st.warning(quiz_state["raw"])
+            elif quiz_state["raw"].startswith("Error generating quiz"):
+                st.error(quiz_state["raw"])
+            else:
+                st.markdown(quiz_state["raw"])
 
     # ──────────────────────────────────────────
     # SCENARIO SIMULATOR (Rulebook only)
     # ──────────────────────────────────────────
-    if st.session_state.mode == "rulebook":
+    if current_mode == "rulebook":
         with st.expander("🏀 Scenario Simulator — Get a rules ruling", expanded=False):
             sc1, sc2 = st.columns(2)
             with sc1:
@@ -1119,13 +1283,13 @@ def main():
                     f"Situation: {situation}\n\n"
                     f"Please provide a clear ruling on this situation, citing the exact rules that apply."
                 )
-                st.session_state.pending_prompt = scenario_prompt
+                st.session_state.pending_prompts[current_mode] = scenario_prompt
                 st.rerun()
 
     # ──────────────────────────────────────────
     # WELCOME SCREEN (no messages yet)
     # ──────────────────────────────────────────
-    if len(st.session_state.messages) == 0:
+    if len(current_messages) == 0:
         _, mid, _ = st.columns([1, 2, 1])
         with mid:
             st.markdown(f"""
@@ -1133,7 +1297,7 @@ def main():
                 <h2 style="color:{theme['primary_color']};">{theme['icon']} Welcome!</h2>
                 <p style="font-size:1.1rem;">
                     {"Ask me anything about NBA rules, regulations, and gameplay."
-                     if st.session_state.mode == "rulebook"
+                     if current_mode == "rulebook"
                      else "Ask me about NBA contracts, salary cap, and league business rules."}
                 </p>
             </div>""", unsafe_allow_html=True)
@@ -1143,7 +1307,7 @@ def main():
             for i, ex in enumerate(theme["examples"]):
                 with (ex1 if i % 2 == 0 else ex2):
                     if st.button(f"{theme['icon']} {ex}", key=f"ex_{i}", use_container_width=True):
-                        st.session_state.pending_prompt = ex
+                        st.session_state.pending_prompts[current_mode] = ex
                         st.rerun()
 
             st.markdown("---")
@@ -1153,7 +1317,7 @@ def main():
     # CHAT HISTORY
     # ──────────────────────────────────────────
     else:
-        for msg in st.session_state.messages:
+        for msg in current_messages:
             with st.chat_message(msg["role"]):
                 st.markdown(msg["content"].replace("$", r"\$"))
 
@@ -1170,7 +1334,7 @@ def main():
                     if msg.get("citations"):
                         st.markdown("---")
                         st.markdown("### 📚 Sources")
-                        render_citations(msg["citations"], st.session_state.mode)
+                        render_citations(msg["citations"], current_mode)
 
                     # Cross-mode suggestion (stored at render time)
                     if msg.get("cross_mode"):
@@ -1183,9 +1347,7 @@ def main():
                             unsafe_allow_html=True,
                         )
                         if st.button(f"Switch to {ot['name']} →", key=f"sw_{msg.get('timestamp',id(msg))}"):
-                            st.session_state.mode     = other
-                            st.session_state.messages = []
-                            st.session_state.session_ids[other] = None
+                            st.session_state.mode = other
                             st.rerun()
 
     # ──────────────────────────────────────────
@@ -1193,7 +1355,7 @@ def main():
     # ──────────────────────────────────────────
     placeholder = (
         "Ask a question about NBA rules…"
-        if st.session_state.mode == "rulebook"
+        if current_mode == "rulebook"
         else "Ask about contracts, salary cap, or CBA rules…"
     )
 
@@ -1201,23 +1363,24 @@ def main():
 
     # Resolve prompt (typed input wins; fallback to pending)
     prompt = typed_prompt
-    if not prompt and st.session_state.pending_prompt:
-        prompt = st.session_state.pending_prompt
-        st.session_state.pending_prompt = None
+    pending_prompt = st.session_state.pending_prompts[current_mode]
+    if not prompt and pending_prompt:
+        prompt = pending_prompt
+        st.session_state.pending_prompts[current_mode] = None
 
     if prompt:
         ts = datetime.now().strftime("%b %d, %I:%M %p")
-        st.session_state.messages.append({"role": "user", "content": prompt, "timestamp": ts})
+        current_messages.append({"role": "user", "content": prompt, "timestamp": ts})
 
         with st.chat_message("user"):
             st.markdown(prompt.replace("$", r"\$"))
             st.markdown(f'<div class="msg-ts">🕐 {ts}</div>', unsafe_allow_html=True)
 
         # ── Animated loading card inside the assistant bubble ────────────────────
-        loading_icon  = "🏀" if st.session_state.mode == "rulebook" else "💰"
+        loading_icon  = "🏀" if current_mode == "rulebook" else "💰"
         loading_label = (
             "Searching the NBA Rulebook…"
-            if st.session_state.mode == "rulebook"
+            if current_mode == "rulebook"
             else "Searching the CBA & Salary Cap docs…"
         )
         loading_html = f"""
@@ -1235,11 +1398,16 @@ def main():
             loading_placeholder = st.empty()
             loading_placeholder.markdown(loading_html, unsafe_allow_html=True)
 
-            cur_session = st.session_state.session_ids.get(st.session_state.mode)
+            cur_session = st.session_state.session_ids.get(current_mode)
             response, citations, new_session = query_knowledge_base(
-                prompt, kb_id, model_arn, st.session_state.mode, session_id=cur_session
+                prompt,
+                kb_id,
+                model_arn,
+                current_mode,
+                session_id=cur_session,
+                region_name=runtime_config["region"],
             )
-            st.session_state.session_ids[st.session_state.mode] = new_session
+            st.session_state.session_ids[current_mode] = new_session
 
             # Swap loading card for the actual response
             loading_placeholder.empty()
@@ -1256,10 +1424,12 @@ def main():
             if citations:
                 st.markdown("---")
                 st.markdown("### 📚 Sources")
-                render_citations(citations, st.session_state.mode)
+                render_citations(citations, current_mode)
+            else:
+                st.caption("No sufficiently relevant source excerpts were returned for this answer.")
 
             # Cross-mode detection & suggestion
-            cross = detect_cross_mode(response, st.session_state.mode)
+            cross = detect_cross_mode(response, current_mode)
             if cross:
                 ot = THEMES[cross]
                 st.markdown(
@@ -1269,13 +1439,11 @@ def main():
                     unsafe_allow_html=True,
                 )
                 if st.button(f"Switch to {ot['name']} →", key=f"switch_new_{resp_ts}"):
-                    st.session_state.mode     = cross
-                    st.session_state.messages = []
-                    st.session_state.session_ids[cross] = None
+                    st.session_state.mode = cross
                     st.rerun()
 
         # Store assistant message
-        st.session_state.messages.append({
+        current_messages.append({
             "role":       "assistant",
             "content":    response,
             "citations":  citations,
