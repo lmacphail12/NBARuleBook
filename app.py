@@ -344,7 +344,16 @@ def init_session_state():
             st.session_state.feedback_by_mode.setdefault(mode, {})
 
     if "queued_action" not in st.session_state:
-        st.session_state.queued_action = None
+        st.session_state.queued_action = {mode: None for mode in MODE_KEYS}
+    elif not isinstance(st.session_state.queued_action, dict):
+        legacy_action = st.session_state.queued_action
+        st.session_state.queued_action = {
+            mode: legacy_action if mode == current_mode else None
+            for mode in MODE_KEYS
+        }
+    else:
+        for mode in MODE_KEYS:
+            st.session_state.queued_action.setdefault(mode, None)
 
 
 def get_messages(mode: str = None):
@@ -386,6 +395,7 @@ def clear_mode_state(mode: str):
     st.session_state.messages_by_mode[mode] = []
     st.session_state.session_ids[mode] = None
     st.session_state.pending_prompts[mode] = None
+    st.session_state.queued_action[mode] = None
     st.session_state.quiz_asked[mode] = {}
     st.session_state.bookmarks_by_mode[mode] = []
     st.session_state.feedback_by_mode[mode] = {}
@@ -403,8 +413,9 @@ def get_message_id(msg: dict) -> str:
     return msg.get("id") or f"legacy-{msg.get('timestamp', 'no-ts')}-{abs(hash(msg.get('content', '')))}"
 
 
-def queue_prompt(mode: str, prompt: str):
+def queue_prompt(mode: str, prompt: str, action_key: str = None):
     st.session_state.pending_prompts[mode] = prompt
+    st.session_state.queued_action[mode] = action_key
 
 
 def save_bookmark(mode: str, msg: dict):
@@ -465,6 +476,67 @@ def parse_answer_sections(text: str) -> dict:
     } or {"Answer": text.strip()}
 
 
+def _sentence_like_chunks(text: str) -> list:
+    normalized = re.sub(r"\s+", " ", text).strip()
+    if not normalized:
+        return []
+
+    chunks = []
+    for part in re.split(r"(?<=[.!?])\s+", normalized):
+        for clause in re.split(r";\s+", part):
+            cleaned = clause.strip(" -*•\t")
+            if cleaned:
+                chunks.append(cleaned)
+    return chunks
+
+
+def is_three_bullet_response(text: str) -> bool:
+    non_empty = [line.strip() for line in text.splitlines() if line.strip()]
+    bullets = [line for line in non_empty if re.match(r"^[-*•]\s+", line)]
+    return len(non_empty) == 3 and len(bullets) == 3
+
+
+def enforce_three_bullet_response(text: str, citations: list, mode: str) -> str:
+    if is_three_bullet_response(text):
+        return text
+
+    sections = parse_answer_sections(text)
+    candidate_chunks = []
+    for section_name in ("Answer", "Direct source support", "Careful inference"):
+        section_text = sections.get(section_name, "")
+        candidate_chunks.extend(_sentence_like_chunks(section_text))
+    if not candidate_chunks:
+        candidate_chunks = _sentence_like_chunks(text)
+
+    bullets = []
+    seen = set()
+    for chunk in candidate_chunks:
+        normalized = chunk.lower()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        bullets.append(chunk.rstrip(".") + ".")
+        if len(bullets) == 3:
+            break
+
+    if not bullets:
+        fallback = text.strip()
+        return f"- {fallback}" if fallback else text
+
+    while len(bullets) < 3:
+        bullets.append(bullets[-1])
+
+    source_labels = [citation_title(citation, mode) for citation in dedupe_citations(citations)[:3]]
+    if not source_labels:
+        source_labels = ["grounded sources attached"]
+
+    formatted = []
+    for idx, bullet in enumerate(bullets[:3]):
+        label = source_labels[min(idx, len(source_labels) - 1)]
+        formatted.append(f"- {bullet} ({label})")
+    return "\n".join(formatted)
+
+
 def build_followup_prompt(action_key: str, msg: dict, mode: str) -> str:
     question = msg.get("question") or "the previous question"
     source_hint = "Use the same source type and keep citations grounded."
@@ -486,7 +558,8 @@ def build_followup_prompt(action_key: str, msg: dict, mode: str) -> str:
             f"Label assumptions clearly. {source_hint}"
         ),
         "bullets": (
-            f"Summarize your answer to '{question}' in exactly 3 bullet points with grounded citations. {source_hint}"
+            f"Summarize your answer to '{question}' in exactly 3 markdown bullet points with grounded citations. "
+            f"Return only the three bullets and nothing else. Each bullet must be a single concise sentence. {source_hint}"
         ),
     }
     return prompts[action_key]
@@ -1405,7 +1478,7 @@ def render_message_controls(msg: dict, mode: str, message_key: str):
     for idx, (action_key, label) in enumerate(FOLLOWUP_ACTIONS.items()):
         with controls[idx]:
             if st.button(label, key=f"follow_{message_key}_{action_key}", use_container_width=True):
-                queue_prompt(mode, build_followup_prompt(action_key, msg, mode))
+                queue_prompt(mode, build_followup_prompt(action_key, msg, mode), action_key=action_key)
                 st.rerun()
 
     utility_cols = st.columns(4)
@@ -2721,9 +2794,12 @@ def main():
     # Resolve prompt (typed input wins; fallback to pending)
     prompt = typed_prompt
     pending_prompt = st.session_state.pending_prompts[current_mode]
+    queued_action = None
     if not prompt and pending_prompt:
         prompt = pending_prompt
         st.session_state.pending_prompts[current_mode] = None
+        queued_action = st.session_state.queued_action[current_mode]
+        st.session_state.queued_action[current_mode] = None
 
     if prompt:
         ts = datetime.now().strftime("%b %d, %I:%M %p")
@@ -2777,6 +2853,8 @@ def main():
             min_display_seconds = loading_state.get("min_display_seconds", 0.0)
             if elapsed < min_display_seconds:
                 time.sleep(min_display_seconds - elapsed)
+            if queued_action == "bullets":
+                response = enforce_three_bullet_response(response, citations, current_mode)
 
             # Swap loading card for the actual response
             loading_placeholder.empty()
