@@ -1996,11 +1996,12 @@ def main():
 
         # Mode toggle (sticky in sidebar)
         st.markdown("### 🔄 Mode")
+        mode_options = list(MODE_KEYS)
         selected_mode = st.radio(
             "",
-            options=["rulebook", "cba"],
+            options=mode_options,
             format_func=lambda x: THEMES[x]["name"],
-            index=list(MODE_KEYS).index(current_mode),
+            index=mode_options.index(current_mode) if current_mode in mode_options else 0,
             label_visibility="collapsed",
         )
         if selected_mode != current_mode:
