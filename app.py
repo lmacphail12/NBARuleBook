@@ -130,6 +130,10 @@ QUICK_CHIPS = {
 }
 STARTER_PROMPTS = {
     "rulebook": {
+        "What constitutes a traveling violation?": "What constitutes a traveling violation under the NBA rulebook? Define the rule, explain the common triggers and exceptions, and cite the exact rule language if available.",
+        "How long is a shot clock in the NBA?": "How long is the NBA shot clock, and when does it reset to different amounts? Cite the rulebook language that governs the timing and reset rules.",
+        "What are the rules for goaltending?": "What are the NBA rules for goaltending and basket interference? Explain when each is called and cite the relevant rule language.",
+        "What's the difference between a foul and a violation?": "Under the NBA rulebook, what is a foul and what is a violation? Define each term, explain the practical difference, and cite the relevant rulebook definitions and examples.",
         "Traveling": "What constitutes a traveling violation under the NBA rulebook? Explain the core rule, common edge cases, and cite the exact rule language if available.",
         "Goaltending": "What is goaltending under the NBA rulebook? Explain when it is called, key exceptions, and cite the governing rule.",
         "Clear path foul": "What makes a foul a clear path foul in the NBA? Explain the criteria, penalty, and exact rule support.",
@@ -155,6 +159,13 @@ STARTER_PROMPTS = {
     },
 }
 RETRIEVAL_EXPANSIONS = {
+    "rulebook": {
+        "difference between a foul and a violation": "foul definition violation definition personal foul technical foul violation rule definitions distinction rule 10 rule 12",
+        "foul and a violation": "foul definition violation definition distinction foul versus violation rule 10 rule 12",
+        "traveling violation": "traveling pivot foot gather steps legal move rule 10",
+        "goaltending": "goaltending basket interference scoring rule field goal touching ball on its downward flight",
+        "shot clock": "24-second clock reset 14-second reset shot clock operator rule",
+    },
     "cba": {
         "trade matching": "salary matching traded player exception over-the-cap incoming salary outgoing salary aggregation first apron second apron tax apron trade math",
         "waiver claims": "waiver claim priority claim order waiver period roster priority operations manual waived player claims",
@@ -540,6 +551,7 @@ def needs_reformulation(response: str, citations: list) -> bool:
         "no sufficiently relevant",
         "error querying knowledge base",
         "aws error",
+        "unable to assist",
     )
     return (not citations) or any(marker in response.lower() for marker in unresolved_markers)
 
@@ -1553,6 +1565,9 @@ Instructions:
    Careful inference (if any):
 4. {exact_clause_instruction}
 {mode_instruction_lines}
+
+Begin your answer now using the required headings.
+Answer:
 """
 
 
