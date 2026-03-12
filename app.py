@@ -128,6 +128,42 @@ QUICK_CHIPS = {
         "Luxury tax",
     ],
 }
+STARTER_PROMPTS = {
+    "rulebook": {
+        "Traveling": "What constitutes a traveling violation under the NBA rulebook? Explain the core rule, common edge cases, and cite the exact rule language if available.",
+        "Goaltending": "What is goaltending under the NBA rulebook? Explain when it is called, key exceptions, and cite the governing rule.",
+        "Clear path foul": "What makes a foul a clear path foul in the NBA? Explain the criteria, penalty, and exact rule support.",
+        "Instant replay": "How does instant replay work under the NBA rulebook? Explain the main review triggers, authority, and procedural limits with citations.",
+        "Shot clock reset": "How do shot clock reset rules work in the NBA? Explain the common reset amounts and when each applies, with citations.",
+        "Out of bounds": "How are out-of-bounds rulings handled in the NBA? Explain player/ball status and cite the relevant rule language.",
+    },
+    "both": {
+        "Technical foul suspension": "Compare technical foul suspension consequences across the NBA rulebook and the CBA / Operations Manual. Explain the on-court rule, accumulation consequences, and any roster or pay implications.",
+        "Waivers and roster spots": "Compare how waivers and roster spots are handled across gameplay rules, the CBA, and basketball operations materials. Explain where each source governs the issue.",
+        "Ejections and discipline": "Compare ejections under the NBA rulebook with discipline, fines, or suspension treatment in the CBA / Operations materials.",
+        "Injuries and contracts": "Compare how injuries are treated in gameplay administration versus contract / roster treatment under the CBA and Operations materials.",
+        "Replay and fines": "Compare instant replay or review situations in the rulebook with any off-court consequences, discipline, or operations treatment in the CBA / Operations sources.",
+        "Two-way availability": "Compare player availability questions under gameplay rules with two-way contract or roster eligibility rules under the CBA and Operations materials.",
+    },
+    "cba": {
+        "Restricted free agency": "How does restricted free agency work under the NBA CBA? Explain qualifying offers, matching rights, offer sheets, timing, and cite the relevant clauses.",
+        "Apron rules": "What are the first apron and second apron rules under the NBA CBA? Explain the key roster-building restrictions and cite the relevant clauses.",
+        "Waiver claims": "How do waiver claim rules work under the NBA CBA and Basketball Operations materials? Explain claim priority, timing, and any salary or roster consequences.",
+        "Two-way contracts": "How do two-way contracts work under the NBA CBA? Explain eligibility, service or game limits, conversion rules, and cite the relevant language.",
+        "Trade matching": "How do NBA trade matching rules work under the CBA? Explain salary matching thresholds, over-the-cap trade rules, traded player exceptions, aggregation, and apron-related trade constraints with citations.",
+        "Luxury tax": "How does the NBA luxury tax work under the CBA? Explain the threshold concept, repeater treatment, and practical team-building effects with citations.",
+    },
+}
+RETRIEVAL_EXPANSIONS = {
+    "cba": {
+        "trade matching": "salary matching traded player exception over-the-cap incoming salary outgoing salary aggregation first apron second apron tax apron trade math",
+        "waiver claims": "waiver claim priority claim order waiver period roster priority operations manual waived player claims",
+        "two-way contracts": "two-way player eligibility conversion service days active list roster limit standard contract conversion",
+        "apron rules": "first apron second apron team salary restrictions trade exception aggregation sign-and-trade taxpayer mid-level hard cap",
+        "restricted free agency": "qualifying offer offer sheet matching rights moratorium restricted free agent",
+        "luxury tax": "tax threshold repeater tax taxpayer non-taxpayer apron team salary",
+    }
+}
 DOC_BROWSE_PRESETS = {
     "rulebook": ["Rule 4", "Rule 10", "Rule 11", "Rule 12", "Instant Replay", "Officials"],
     "both": ["Suspensions", "Waivers", "Discipline", "Roster limits", "Two-way rules", "Replay consequences"],
@@ -508,6 +544,26 @@ def needs_reformulation(response: str, citations: list) -> bool:
     return (not citations) or any(marker in response.lower() for marker in unresolved_markers)
 
 
+def starter_prompt_for(mode: str, label: str) -> str:
+    mapped = STARTER_PROMPTS.get(mode, {}).get(label)
+    if mapped:
+        return mapped
+    if mode == "cba":
+        return f"{label} Explain it in plain language, cite the exact CBA or Operations provisions, and include the key practical implications."
+    if mode == "both":
+        return build_crossbook_prompt(label)
+    return f"{label} Explain the rule clearly and cite the exact rule language if available."
+
+
+def expand_query_for_retrieval(question: str, mode: str) -> str:
+    expansions = RETRIEVAL_EXPANSIONS.get(mode, {})
+    question_lower = question.lower()
+    matched = [hint for phrase, hint in expansions.items() if phrase in question_lower]
+    if not matched:
+        return question
+    return f"{question}\n\nRetrieval hints: {'; '.join(matched)}."
+
+
 def safe_markdown(text: str) -> str:
     return text.replace("$", r"\$")
 
@@ -879,6 +935,48 @@ textarea::placeholder, input::placeholder {{
 }}
 .loading-dots span:nth-child(2) {{ animation-delay: 0.2s; }}
 .loading-dots span:nth-child(3) {{ animation-delay: 0.4s; }}
+.thinking-banner {{
+    position: sticky;
+    top: 0.5rem;
+    z-index: 20;
+    padding: 0.9rem 1rem;
+    margin: 0.35rem 0 1rem 0;
+    border-radius: 14px;
+    border: 1px solid {p}44;
+    background: linear-gradient(135deg, {surface} 0%, {chat_bg} 100%);
+    box-shadow: 0 8px 22px rgba(0,0,0,0.08);
+}}
+.thinking-title {{
+    color: {p} !important;
+    font-weight: 800;
+    margin-bottom: 0.25rem;
+}}
+.thinking-sub {{
+    font-size: 0.86rem;
+    color: {text} !important;
+    opacity: 0.82;
+    margin-bottom: 0.45rem;
+}}
+.thinking-track {{
+    width: 100%;
+    height: 8px;
+    border-radius: 999px;
+    background: {p}22;
+    overflow: hidden;
+}}
+.thinking-track::after {{
+    content: "";
+    display: block;
+    width: 35%;
+    height: 100%;
+    border-radius: 999px;
+    background: linear-gradient(90deg, transparent 0%, {p} 35%, {theme["gradient_end"]} 100%);
+    animation: thinking-slide 1.25s ease-in-out infinite;
+}}
+@keyframes thinking-slide {{
+    0% {{ transform: translateX(-120%); }}
+    100% {{ transform: translateX(320%); }}
+}}
 
 /* ── Stray Streamlit chrome ────────────── */
 footer {{ display: none !important; }}
@@ -1629,6 +1727,29 @@ def query_app_mode(question: str, mode: str, runtime_config: dict, retrieval_set
             region_name=runtime_config["region"],
             retrieval_settings=retrieval_settings,
         )
+
+        expanded_question = expand_query_for_retrieval(question, mode)
+        if expanded_question != question and needs_reformulation(response, citations):
+            retry_response, retry_citations, new_session = query_knowledge_base(
+                expanded_question,
+                runtime_config["kb_id"],
+                runtime_config["model_arn"],
+                mode,
+                session_id=new_session,
+                region_name=runtime_config["region"],
+                retrieval_settings=retrieval_settings,
+            )
+            retry_is_better = (
+                bool(retry_citations)
+                and (
+                    not citations
+                    or len(retry_citations) > len(citations)
+                    or not needs_reformulation(retry_response, retry_citations)
+                )
+            )
+            if retry_is_better:
+                response, citations = retry_response, retry_citations
+
         st.session_state.session_ids[mode] = new_session
         for citation in citations:
             citation["source_domain"] = mode
@@ -1856,11 +1977,7 @@ def render_quick_chips(mode: str):
     for idx, chip in enumerate(QUICK_CHIPS[mode]):
         with chip_cols[idx % 3]:
             if st.button(chip, key=f"chip_{mode}_{idx}", use_container_width=True):
-                prompt = (
-                    build_crossbook_prompt(chip)
-                    if mode == "both"
-                    else f"Give me a grounded explanation of {chip.lower()} with the exact clause if available."
-                )
+                prompt = starter_prompt_for(mode, chip)
                 queue_prompt(mode, prompt)
                 st.rerun()
 
@@ -2139,7 +2256,7 @@ def main():
     for idx, ex in enumerate(theme["examples"]):
         with starter_cols[idx % 2]:
             if st.button(f"{theme['icon']} {ex}", key=f"starter_{current_mode}_{idx}", use_container_width=True):
-                queue_prompt(current_mode, ex)
+                queue_prompt(current_mode, starter_prompt_for(current_mode, ex))
                 st.rerun()
     st.markdown("---")
 
@@ -2389,6 +2506,7 @@ def main():
             st.markdown(f'<div class="msg-ts">🕐 {ts}</div>', unsafe_allow_html=True)
 
         # ── Animated loading card inside the assistant bubble ────────────────────
+        status_placeholder = st.empty()
         loading_icon  = "🏀" if current_mode == "rulebook" else "🏀 + 💰" if current_mode == "both" else "💰"
         loading_label = (
             "Searching the NBA Rulebook…"
@@ -2397,12 +2515,25 @@ def main():
             if current_mode == "both"
             else "Searching the CBA & Salary Cap docs…"
         )
+        loading_sub = (
+            "Parsing the rule language and preparing a ruling."
+            if current_mode == "rulebook"
+            else "Cross-checking both source families and stitching the views together."
+            if current_mode == "both"
+            else "Large CBA lookups can take a bit longer while the app matches clauses and trade / cap terminology."
+        )
+        thinking_banner_html = f"""
+<div class="thinking-banner">
+    <div class="thinking-title">{loading_label}</div>
+    <div class="thinking-sub">{loading_sub}</div>
+    <div class="thinking-track"></div>
+</div>"""
         loading_html = f"""
 <div class="loading-card">
     <div class="loading-ball">{loading_icon}</div>
     <div class="loading-ring"></div>
     <div class="loading-label">{loading_label}</div>
-    <div class="loading-sub">Retrieving relevant sections and generating your answer</div>
+    <div class="loading-sub">{loading_sub}</div>
     <div class="loading-dots" style="margin-top:0.8rem;">
         <span></span><span></span><span></span>
     </div>
@@ -2410,12 +2541,14 @@ def main():
 
         with st.chat_message("assistant"):
             loading_placeholder = st.empty()
+            status_placeholder.markdown(thinking_banner_html, unsafe_allow_html=True)
             loading_placeholder.markdown(loading_html, unsafe_allow_html=True)
 
             response, citations = query_app_mode(prompt, current_mode, runtime_config, retrieval_settings)
 
             # Swap loading card for the actual response
             loading_placeholder.empty()
+            status_placeholder.empty()
 
             resp_ts = datetime.now().strftime("%b %d, %I:%M %p")
             cross = detect_cross_mode(response, current_mode) if current_mode in ("rulebook", "cba") else None
