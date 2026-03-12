@@ -4,6 +4,7 @@ import json
 import uuid
 import re
 import os
+import html
 from datetime import datetime
 from botocore.exceptions import ClientError
 
@@ -38,6 +39,23 @@ THEMES = {
             "What's the difference between a foul and a violation?",
         ],
     },
+    "both": {
+        "name": "🏀 + 💰 Crossbook Search",
+        "kb_id": "",
+        "primary_color": "#0D47A1",
+        "secondary_color": "#F9A825",
+        "gradient_start": "#0D47A1",
+        "gradient_end": "#1976D2",
+        "title": "🏀 + 💰 NBA Crossbook Workbench",
+        "subtitle": "Compare gameplay rules with roster, contract, and operations consequences",
+        "icon": "🏀 + 💰",
+        "examples": [
+            "How do technical foul suspensions connect to salary or contract consequences?",
+            "What happens in both the rulebook and CBA when a player is waived while injured?",
+            "Compare rulebook ejections with CBA fines or discipline language.",
+            "What game-rule events can trigger salary-cap or roster implications?",
+        ],
+    },
     "cba": {
         "name": "💰 CBA & Salary Cap",
         "kb_id": "B902HDGE8W",
@@ -58,11 +76,63 @@ THEMES = {
 }
 
 MODE_KEYS = tuple(THEMES.keys())
+DUAL_MODE_SESSION_KEYS = ("both_rulebook", "both_cba")
 DEFAULT_MODEL_ARNS = {
     "rulebook": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
     "cba": "us.anthropic.claude-opus-4-20250514-v1:0",
 }
 DEFAULT_QUIZ_MODEL_ID = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+RETRIEVAL_DEFAULTS = {
+    "strict_grounding": True,
+    "number_of_results": 6,
+    "max_sources": 4,
+    "exact_match_bias": False,
+    "include_operations_manual": True,
+}
+EXPORT_FORMATS = (
+    "Transcript",
+    "Scout note",
+    "Cap memo",
+    "Game ruling summary",
+)
+FOLLOWUP_ACTIONS = {
+    "quote": "Exact clause",
+    "fan": "Fan version",
+    "analyst": "Analyst memo",
+    "hypothetical": "Hypothetical",
+    "bullets": "3 bullets",
+}
+QUICK_CHIPS = {
+    "rulebook": [
+        "Traveling",
+        "Goaltending",
+        "Clear path foul",
+        "Instant replay",
+        "Shot clock reset",
+        "Out of bounds",
+    ],
+    "both": [
+        "Technical foul suspension",
+        "Waivers and roster spots",
+        "Ejections and discipline",
+        "Injuries and contracts",
+        "Replay and fines",
+        "Two-way availability",
+    ],
+    "cba": [
+        "Restricted free agency",
+        "Apron rules",
+        "Waiver claims",
+        "Two-way contracts",
+        "Trade matching",
+        "Luxury tax",
+    ],
+}
+DOC_BROWSE_PRESETS = {
+    "rulebook": ["Rule 4", "Rule 10", "Rule 11", "Rule 12", "Instant Replay", "Officials"],
+    "both": ["Suspensions", "Waivers", "Discipline", "Roster limits", "Two-way rules", "Replay consequences"],
+    "cba": ["Article II", "Article VI", "Article VII", "Waivers", "Luxury tax", "Two-way contracts"],
+}
 
 # ─────────────────────────────────────────────
 # CBA SOURCE IDENTIFICATION
@@ -144,11 +214,19 @@ def _empty_quiz_state():
     }
 
 
+def _default_retrieval_settings():
+    return dict(RETRIEVAL_DEFAULTS)
+
+
 def init_session_state():
     defaults = {
         "mode": "rulebook",
         "dark_mode": False,
-        "session_ids": {mode: None for mode in MODE_KEYS},
+        "session_ids": {
+            **{mode: None for mode in MODE_KEYS},
+            **{key: None for key in DUAL_MODE_SESSION_KEYS},
+        },
+        "export_format": EXPORT_FORMATS[0],
     }
     for key, val in defaults.items():
         if key not in st.session_state:
@@ -168,6 +246,8 @@ def init_session_state():
 
     for mode in MODE_KEYS:
         st.session_state.session_ids.setdefault(mode, None)
+    for key in DUAL_MODE_SESSION_KEYS:
+        st.session_state.session_ids.setdefault(key, None)
 
     if "pending_prompts" not in st.session_state:
         legacy_prompt = st.session_state.get("pending_prompt")
@@ -197,6 +277,27 @@ def init_session_state():
         for mode in MODE_KEYS:
             st.session_state.quiz_asked.setdefault(mode, {})
 
+    if "retrieval_settings" not in st.session_state:
+        st.session_state.retrieval_settings = {mode: _default_retrieval_settings() for mode in MODE_KEYS}
+    else:
+        for mode in MODE_KEYS:
+            st.session_state.retrieval_settings.setdefault(mode, _default_retrieval_settings())
+
+    if "bookmarks_by_mode" not in st.session_state:
+        st.session_state.bookmarks_by_mode = {mode: [] for mode in MODE_KEYS}
+    else:
+        for mode in MODE_KEYS:
+            st.session_state.bookmarks_by_mode.setdefault(mode, [])
+
+    if "feedback_by_mode" not in st.session_state:
+        st.session_state.feedback_by_mode = {mode: {} for mode in MODE_KEYS}
+    else:
+        for mode in MODE_KEYS:
+            st.session_state.feedback_by_mode.setdefault(mode, {})
+
+    if "queued_action" not in st.session_state:
+        st.session_state.queued_action = None
+
 
 def get_messages(mode: str = None):
     mode = mode or st.session_state.mode
@@ -218,12 +319,201 @@ def get_quiz_history(mode: str, topic: str):
     return topic_history.setdefault(topic, [])
 
 
+def get_retrieval_settings(mode: str = None):
+    mode = mode or st.session_state.mode
+    return st.session_state.retrieval_settings[mode]
+
+
+def get_bookmarks(mode: str = None):
+    mode = mode or st.session_state.mode
+    return st.session_state.bookmarks_by_mode[mode]
+
+
+def get_feedback_store(mode: str = None):
+    mode = mode or st.session_state.mode
+    return st.session_state.feedback_by_mode[mode]
+
+
 def clear_mode_state(mode: str):
     st.session_state.messages_by_mode[mode] = []
     st.session_state.session_ids[mode] = None
     st.session_state.pending_prompts[mode] = None
     st.session_state.quiz_asked[mode] = {}
+    st.session_state.bookmarks_by_mode[mode] = []
+    st.session_state.feedback_by_mode[mode] = {}
     reset_quiz_state(mode)
+    if mode == "both":
+        for key in DUAL_MODE_SESSION_KEYS:
+            st.session_state.session_ids[key] = None
+
+
+def make_message_id() -> str:
+    return uuid.uuid4().hex[:12]
+
+
+def get_message_id(msg: dict) -> str:
+    return msg.get("id") or f"legacy-{msg.get('timestamp', 'no-ts')}-{abs(hash(msg.get('content', '')))}"
+
+
+def queue_prompt(mode: str, prompt: str):
+    st.session_state.pending_prompts[mode] = prompt
+
+
+def save_bookmark(mode: str, msg: dict):
+    bookmarks = get_bookmarks(mode)
+    bookmark_id = get_message_id(msg)
+    if any(b["id"] == bookmark_id for b in bookmarks):
+        return
+
+    title_source = msg.get("question") or msg.get("content", "")
+    bookmarks.append({
+        "id": bookmark_id,
+        "title": title_source[:72] + ("..." if len(title_source) > 72 else ""),
+        "question": msg.get("question", ""),
+        "content": msg.get("content", ""),
+        "timestamp": msg.get("timestamp", ""),
+        "mode": mode,
+    })
+
+
+def record_feedback(mode: str, message_id: str, label: str):
+    get_feedback_store(mode)[message_id] = {
+        "label": label,
+        "timestamp": datetime.now().strftime("%b %d, %I:%M %p"),
+    }
+
+
+def parse_answer_sections(text: str) -> dict:
+    sections = {}
+    current = "Answer"
+    sections[current] = []
+    heading_map = {
+        "answer": "Answer",
+        "direct source support": "Direct source support",
+        "careful inference (if any)": "Careful inference",
+        "careful inference": "Careful inference",
+        "related rule/cba topic": "Related topic",
+        "rulebook view": "Rulebook view",
+        "cba / operations view": "CBA / Operations view",
+        "cba/operations view": "CBA / Operations view",
+        "takeaway": "Takeaway",
+    }
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            sections.setdefault(current, []).append("")
+            continue
+        normalized = line.rstrip(":").lower()
+        if normalized in heading_map:
+            current = heading_map[normalized]
+            sections.setdefault(current, [])
+            continue
+        sections.setdefault(current, []).append(raw_line)
+
+    return {
+        title: "\n".join(lines).strip()
+        for title, lines in sections.items()
+        if "\n".join(lines).strip()
+    } or {"Answer": text.strip()}
+
+
+def build_followup_prompt(action_key: str, msg: dict, mode: str) -> str:
+    question = msg.get("question") or "the previous question"
+    source_hint = "Use the same source type and keep citations grounded."
+    prompts = {
+        "quote": (
+            f"Using the same topic as this earlier question: '{question}', give me the exact clause or closest verbatim source language only. "
+            f"Keep the answer quote-focused and concise. {source_hint}"
+        ),
+        "fan": (
+            f"Rewrite your answer to this question for a casual NBA fan: '{question}'. "
+            f"Use plain language, short sentences, and keep the citations grounded. {source_hint}"
+        ),
+        "analyst": (
+            f"Rewrite your answer to this question as a front-office analyst memo: '{question}'. "
+            f"Lead with the key takeaway, then implications, then direct source support. {source_hint}"
+        ),
+        "hypothetical": (
+            f"For the earlier question '{question}', give me one realistic hypothetical example and walk through how the rule or CBA language applies. "
+            f"Label assumptions clearly. {source_hint}"
+        ),
+        "bullets": (
+            f"Summarize your answer to '{question}' in exactly 3 bullet points with grounded citations. {source_hint}"
+        ),
+    }
+    return prompts[action_key]
+
+
+def build_compare_prompt(left: str, right: str, mode: str) -> str:
+    scope = (
+        "Use both the NBA Rulebook and CBA / Operations Manual sources."
+        if mode == "both"
+        else f"Use the {THEMES[mode]['name']} sources."
+    )
+    return (
+        f"Compare these two items: '{left}' and '{right}'. {scope} "
+        "Answer with sections titled: Answer, Direct source support, Careful inference (if any), and Key differences."
+    )
+
+
+def build_crossbook_prompt(topic: str) -> str:
+    return (
+        f"For the topic '{topic}', compare the gameplay-rule view with the CBA / Basketball Operations view. "
+        "Explain what the rulebook governs, what the CBA or Operations Manual governs, and where the two interact."
+    )
+
+
+def build_doc_browse_prompt(browse_type: str, browse_value: str, mode: str) -> str:
+    scope = (
+        "Search across both the Rulebook and CBA / Operations sources."
+        if mode == "both"
+        else f"Search within the {THEMES[mode]['name']} sources."
+    )
+    return (
+        f"Browse by {browse_type.lower()}: '{browse_value}'. {scope} "
+        "Show the most relevant clause, explain it briefly, and list adjacent related sections if available."
+    )
+
+
+def suggest_reformulations(question: str, mode: str) -> list:
+    narrowed = question.rstrip(" ?.")
+    if mode == "rulebook":
+        return [
+            f"What exact rule or section addresses {narrowed.lower()}?",
+            f"Give me the verbatim rule language for {narrowed.lower()}.",
+            f"Walk through a game scenario involving {narrowed.lower()} step by step.",
+        ]
+    if mode == "cba":
+        return [
+            f"What exact CBA article or operations section covers {narrowed.lower()}?",
+            f"Explain {narrowed.lower()} in plain language with the exact clause.",
+            f"What are the practical roster or salary-cap implications of {narrowed.lower()}?",
+        ]
+    return [
+        f"Compare the rulebook impact and CBA impact of {narrowed.lower()}.",
+        f"Show me the exact clauses in both sources for {narrowed.lower()}.",
+        f"What happens on-court and off-court when {narrowed.lower()}?",
+    ]
+
+
+def needs_reformulation(response: str, citations: list) -> bool:
+    unresolved_markers = (
+        "does not directly resolve",
+        "closest relevant",
+        "not enough grounded",
+        "no sufficiently relevant",
+        "error querying knowledge base",
+        "aws error",
+    )
+    return (not citations) or any(marker in response.lower() for marker in unresolved_markers)
+
+
+def safe_markdown(text: str) -> str:
+    return text.replace("$", r"\$")
+
+
+def html_safe(text: str) -> str:
+    return html.escape(text).replace("\n", "<br>")
 
 init_session_state()
 
@@ -251,6 +541,39 @@ def build_css(theme: dict, dark: bool) -> str:
 /* ── Typography ───────────────────────── */
 h1,h2,h3 {{ color: {text} !important; }}
 .subtitle {{ color: {sub_text}; font-size:1.1rem; font-weight:600; }}
+.hero-shell {{
+    background:
+        radial-gradient(circle at top right, {p}33 0%, transparent 35%),
+        linear-gradient(135deg, {surface} 0%, {chat_bg} 100%);
+    border: 1px solid {p}33;
+    border-radius: 20px;
+    padding: 1.4rem 1.5rem;
+    margin-bottom: 1rem;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.08);
+}}
+.hero-kicker {{
+    display: inline-block;
+    padding: 0.2rem 0.65rem;
+    border-radius: 999px;
+    background: {p}22;
+    color: {p} !important;
+    font-size: 0.8rem;
+    font-weight: 700;
+    letter-spacing: 0.4px;
+    margin-bottom: 0.6rem;
+}}
+.hero-title {{
+    font-size: 2rem;
+    font-weight: 800;
+    line-height: 1.1;
+    margin: 0;
+}}
+.hero-sub {{
+    margin-top: 0.55rem;
+    font-size: 1rem;
+    color: {text} !important;
+    opacity: 0.88;
+}}
 
 /* ── Global text fill (Safari/iOS) ────── */
 p, span, li, .stMarkdown, .stMarkdown p, .stMarkdown span, .stMarkdown li {{
@@ -323,6 +646,12 @@ p, span, li, .stMarkdown, .stMarkdown p, .stMarkdown span, .stMarkdown li {{
     font-weight: 600;
     margin-bottom: 0.5rem;
 }}
+.relevance-note {{
+    font-size: 0.8rem;
+    color: #7f8c8d !important;
+    margin-top: -0.15rem;
+    margin-bottom: 0.55rem;
+}}
 
 /* ── Source excerpt ────────────────────── */
 .source-excerpt {{
@@ -337,6 +666,55 @@ p, span, li, .stMarkdown, .stMarkdown p, .stMarkdown span, .stMarkdown li {{
     line-height: 1.6;
     box-shadow: 0 2px 4px rgba(0,0,0,0.06);
     word-wrap: break-word;
+}}
+.source-rail {{
+    background: {surface};
+    border: 1px solid {p}22;
+    border-radius: 16px;
+    padding: 1rem;
+    box-shadow: 0 8px 20px rgba(0,0,0,0.06);
+}}
+.answer-card {{
+    background: {surface};
+    border: 1px solid {p}22;
+    border-radius: 16px;
+    padding: 1rem 1.1rem;
+    box-shadow: 0 8px 20px rgba(0,0,0,0.05);
+}}
+.answer-section {{
+    background: {chat_bg};
+    border-radius: 14px;
+    padding: 0.9rem 1rem;
+    margin-bottom: 0.9rem;
+    border-left: 4px solid {p};
+}}
+.section-label {{
+    font-size: 0.78rem;
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+    color: {p} !important;
+    font-weight: 800;
+    margin-bottom: 0.35rem;
+}}
+.helper-card {{
+    background: linear-gradient(135deg, {p}15 0%, {s}12 100%);
+    border: 1px solid {p}22;
+    border-radius: 14px;
+    padding: 0.85rem 1rem;
+    margin: 0.6rem 0;
+}}
+.quote-card {{
+    background: {chat_bg};
+    border-radius: 14px;
+    padding: 0.95rem 1rem;
+    border-left: 4px solid {s};
+    margin-bottom: 0.75rem;
+    font-style: italic;
+}}
+.split-subhead {{
+    font-size: 0.86rem;
+    color: {sub_text} !important;
+    margin-bottom: 0.5rem;
 }}
 
 /* ── Cross-mode suggestion ─────────────── */
@@ -380,6 +758,27 @@ div[data-testid="stButton"] button[kind="secondary"]:hover {{
     margin: 0.4rem 0;
 }}
 .metric-card h2, .metric-card p {{ color: white !important; margin: 0; }}
+.bookmark-card {{
+    background: {surface};
+    border: 1px solid {p}22;
+    border-radius: 12px;
+    padding: 0.8rem 0.9rem;
+    margin-bottom: 0.6rem;
+}}
+.bookmark-meta {{
+    color: #888 !important;
+    font-size: 0.78rem;
+}}
+.feedback-pill {{
+    display: inline-block;
+    border-radius: 999px;
+    padding: 0.22rem 0.65rem;
+    font-size: 0.76rem;
+    font-weight: 700;
+    background: {p}18;
+    color: {p} !important;
+    margin-top: 0.5rem;
+}}
 
 /* ── Sidebar ───────────────────────────── */
 [data-testid="stSidebar"] {{
@@ -402,6 +801,11 @@ div[data-testid="stButton"] button[kind="secondary"]:hover {{
     -webkit-text-fill-color: {text} !important;
     background-color: {surface} !important;
     opacity: 1 !important;
+}}
+.chip-intro {{
+    font-size: 0.83rem;
+    color: #7f8c8d !important;
+    margin-bottom: 0.5rem;
 }}
 textarea::placeholder, input::placeholder {{
     color: #777 !important;
@@ -479,10 +883,39 @@ textarea::placeholder, input::placeholder {{
 /* ── Stray Streamlit chrome ────────────── */
 footer {{ display: none !important; }}
 
+/* ── Floating Mobile Nav ───────────────── */
+.mobile-nav {{
+    position: fixed;
+    left: 50%;
+    bottom: 14px;
+    transform: translateX(-50%);
+    z-index: 999;
+    display: flex;
+    gap: 0.55rem;
+    padding: 0.5rem 0.7rem;
+    border-radius: 999px;
+    backdrop-filter: blur(12px);
+    background: rgba(15, 52, 96, 0.82);
+    border: 1px solid rgba(255,255,255,0.12);
+    box-shadow: 0 8px 24px rgba(0,0,0,0.2);
+}}
+.mobile-nav a {{
+    color: white !important;
+    text-decoration: none !important;
+    font-size: 0.8rem;
+    font-weight: 700;
+    padding: 0.15rem 0.35rem;
+}}
+
 /* ── Responsive ────────────────────────── */
 @media (max-width: 768px) {{
     .main {{ padding: 1rem !important; padding-bottom: 100px !important; }}
     h1    {{ font-size: 1.4rem !important; }}
+    .hero-title {{ font-size: 1.5rem; }}
+    .hero-shell {{ padding: 1rem; }}
+}}
+@media (min-width: 769px) {{
+    .mobile-nav {{ display: none; }}
 }}
 </style>
 """
@@ -538,6 +971,14 @@ def get_aws_region():
 
 
 def get_mode_runtime_config(mode: str) -> dict:
+    if mode == "both":
+        return {
+            "kb_id": "",
+            "model_arn": DEFAULT_MODEL_ARNS["rulebook"],
+            "quiz_model_id": DEFAULT_QUIZ_MODEL_ID,
+            "region": get_aws_region(),
+        }
+
     theme = THEMES[mode]
     knowledge_bases = _secret_section("knowledge_bases")
     models = _secret_section("models")
@@ -669,6 +1110,182 @@ def render_citations(citations: list, mode: str):
         st.markdown("")
 
 
+def dedupe_citations(citations: list) -> list:
+    seen, unique = set(), []
+    for citation in citations or []:
+        fingerprint = (
+            citation.get("content", "").strip()[:150],
+            citation.get("uri", "").split("#")[0],
+        )
+        if fingerprint in seen:
+            continue
+        seen.add(fingerprint)
+        unique.append(citation)
+    return unique
+
+
+def citation_title(citation: dict, mode: str) -> str:
+    metadata = citation.get("metadata", {})
+    loc_parts = [
+        f"{key.title()} {metadata[key]}"
+        for key in ["rule", "section", "article", "part", "page"]
+        if key in metadata
+    ]
+    base = ", ".join(loc_parts) if loc_parts else citation.get("uri", "Source").split("/")[-1][:48]
+    source_domain = citation.get("source_domain")
+    if source_domain == "rulebook":
+        return f"🏀 {base}"
+    if source_domain == "cba":
+        return f"💰 {base}"
+    if mode == "cba":
+        badge_label, _, _ = identify_cba_source(citation.get("uri", ""))
+        return f"{badge_label} - {base}"
+    return base
+
+
+def render_answer_sections(text: str):
+    for title, body in parse_answer_sections(text).items():
+        st.markdown(
+            f'<div class="answer-section"><div class="section-label">{html_safe(title)}</div>{html_safe(body)}</div>',
+            unsafe_allow_html=True,
+        )
+
+
+def render_reformulation_box(question: str, mode: str, message_key: str):
+    suggestions = suggest_reformulations(question, mode)
+    st.markdown(
+        '<div class="helper-card"><div class="section-label">Try a narrower follow-up</div></div>',
+        unsafe_allow_html=True,
+    )
+    cols = st.columns(len(suggestions))
+    for idx, suggestion in enumerate(suggestions):
+        with cols[idx]:
+            if st.button(suggestion[:28] + ("..." if len(suggestion) > 28 else ""), key=f"retry_{message_key}_{idx}", use_container_width=True):
+                queue_prompt(mode, suggestion)
+                st.rerun()
+
+
+def render_source_panel(msg: dict, mode: str, message_key: str):
+    citations = dedupe_citations(msg.get("citations", []))
+    st.markdown('<div class="source-rail">', unsafe_allow_html=True)
+    st.markdown('<div class="section-label">Source Navigator</div>', unsafe_allow_html=True)
+    if not citations:
+        st.caption("No confidently matched excerpts are attached to this answer.")
+        st.markdown("</div>", unsafe_allow_html=True)
+        return
+
+    conf_label, conf_color = get_confidence(citations)
+    st.markdown(
+        f'<span class="conf-badge" style="background:{conf_color}22;color:{conf_color};'
+        f'border:1px solid {conf_color};">Confidence: {conf_label}</span>',
+        unsafe_allow_html=True,
+    )
+    spotlight_idx = st.radio(
+        "Source spotlight",
+        options=list(range(len(citations))),
+        format_func=lambda idx: citation_title(citations[idx], mode),
+        key=f"spotlight_{message_key}",
+    )
+    citation = citations[spotlight_idx]
+    content = citation.get("content", "No content available")
+    match_terms = citation.get("match_terms", [])
+    source_mode = citation.get("source_domain")
+
+    tabs = st.tabs(["Navigator", "Exact clause", "Answer vs source"])
+    with tabs[0]:
+        if source_mode and mode == "both":
+            st.markdown(
+                f'<div class="split-subhead">Pulled from the {"Rulebook" if source_mode == "rulebook" else "CBA / Operations"} lane.</div>',
+                unsafe_allow_html=True,
+            )
+        if match_terms:
+            st.markdown(
+                f'<div class="relevance-note">Matched on: {", ".join(match_terms)}</div>',
+                unsafe_allow_html=True,
+            )
+        if citation.get("match_score") is not None:
+            st.caption(f"Retrieval score: {citation['match_score']}")
+        preview = content[:350] + ("…" if len(content) > 350 else "")
+        st.markdown(f'<div class="source-excerpt">{html_safe(preview)}</div>', unsafe_allow_html=True)
+        if citation.get("metadata"):
+            st.json(citation["metadata"], expanded=False)
+    with tabs[1]:
+        st.markdown(f'<div class="quote-card">{html_safe(content)}</div>', unsafe_allow_html=True)
+        st.code(content, language=None)
+    with tabs[2]:
+        compare_left, compare_right = st.columns(2)
+        with compare_left:
+            st.markdown('<div class="section-label">Answer snapshot</div>', unsafe_allow_html=True)
+            sections = parse_answer_sections(msg.get("content", ""))
+            st.markdown(safe_markdown(sections.get("Answer", msg.get("content", ""))))
+        with compare_right:
+            st.markdown('<div class="section-label">Exact source text</div>', unsafe_allow_html=True)
+            st.markdown(safe_markdown(content))
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+def render_message_controls(msg: dict, mode: str, message_key: str):
+    st.markdown('<div class="split-subhead">Follow-up transforms</div>', unsafe_allow_html=True)
+    controls = st.columns(5)
+    for idx, (action_key, label) in enumerate(FOLLOWUP_ACTIONS.items()):
+        with controls[idx]:
+            if st.button(label, key=f"follow_{message_key}_{action_key}", use_container_width=True):
+                queue_prompt(mode, build_followup_prompt(action_key, msg, mode))
+                st.rerun()
+
+    utility_cols = st.columns(4)
+    with utility_cols[0]:
+        if st.button("Save", key=f"save_{message_key}", use_container_width=True):
+            save_bookmark(mode, msg)
+            st.rerun()
+    with utility_cols[1]:
+        if st.button("Helpful", key=f"fb_good_{message_key}", use_container_width=True):
+            record_feedback(mode, message_key, "Helpful")
+            st.rerun()
+    with utility_cols[2]:
+        if st.button("Unclear", key=f"fb_unclear_{message_key}", use_container_width=True):
+            record_feedback(mode, message_key, "Unclear")
+            st.rerun()
+    with utility_cols[3]:
+        if st.button("Wrong citation", key=f"fb_citation_{message_key}", use_container_width=True):
+            record_feedback(mode, message_key, "Wrong citation")
+            st.rerun()
+
+    feedback = get_feedback_store(mode).get(message_key)
+    if feedback:
+        st.markdown(f'<span class="feedback-pill">Feedback: {feedback["label"]}</span>', unsafe_allow_html=True)
+
+
+def render_assistant_message(msg: dict, mode: str):
+    message_key = get_message_id(msg)
+    left_col, right_col = st.columns([1.8, 1.15], gap="large")
+    with left_col:
+        st.markdown('<div class="answer-card">', unsafe_allow_html=True)
+        if msg.get("timestamp"):
+            st.markdown(f'<div class="msg-ts">🕐 {msg["timestamp"]}</div>', unsafe_allow_html=True)
+        render_answer_sections(msg["content"])
+        render_message_controls(msg, mode, message_key)
+        with st.expander("📋 Copy response"):
+            st.code(msg["content"], language=None)
+        if needs_reformulation(msg.get("content", ""), msg.get("citations", [])):
+            render_reformulation_box(msg.get("question", "this topic"), mode, message_key)
+        if msg.get("cross_mode") and mode != "both":
+            other = msg["cross_mode"]
+            ot = THEMES[other]
+            st.markdown(
+                f'<div class="cross-mode-box">💡 <strong>Did you know?</strong> '
+                f"This topic also has implications in <strong>{ot['name']}</strong>. "
+                f"Switch modes to explore further!</div>",
+                unsafe_allow_html=True,
+            )
+            if st.button(f"Switch to {ot['name']} →", key=f"switch_saved_{message_key}", use_container_width=True):
+                st.session_state.mode = other
+                st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
+    with right_col:
+        render_source_panel(msg, mode, message_key)
+
+
 # ─────────────────────────────────────────────
 # KNOWLEDGE BASE QUERY
 # ─────────────────────────────────────────────
@@ -724,11 +1341,9 @@ _STOPWORDS = {
     "team","game","ball","court","play","players","teams",
 }
 
-def _score_citation(citation: dict, question: str) -> float:
+def _citation_match_details(citation: dict, question: str, exact_match_bias: bool = False):
     """
-    Score a citation's relevance.
-    Uses keyword overlap between the citation and the user's question.
-    Returns a float 0-1.  Higher = more relevant.
+    Return (score, matched_terms) describing why a citation matched the question.
     """
     def keywords(text: str) -> set:
         tokens = re.findall(r"[a-z]+", text.lower())
@@ -736,15 +1351,16 @@ def _score_citation(citation: dict, question: str) -> float:
 
     q_kw = keywords(question)
     if not q_kw:
-        return 0.0
+        return 0.0, []
 
     metadata = " ".join(f"{k} {v}" for k, v in citation.get("metadata", {}).items())
     cit_kw = keywords(f"{citation.get('content', '')} {metadata} {citation.get('uri', '')}")
 
     if not cit_kw:
-        return 0.0
+        return 0.0, []
 
     overlap_score = len(cit_kw & q_kw) / len(q_kw)
+    matched_terms = sorted(cit_kw & q_kw)
     phrase_bonus = 0.0
 
     question_lower = question.lower()
@@ -754,11 +1370,13 @@ def _score_citation(citation: dict, question: str) -> float:
         if len(phrase.split()) >= 2 and (phrase in content_lower or phrase in uri_lower):
             phrase_bonus = max(phrase_bonus, 0.15)
 
-    return min(overlap_score + phrase_bonus, 1.0)
+    exact_bonus = 0.08 if exact_match_bias and matched_terms else 0.0
+    return min(overlap_score + phrase_bonus + exact_bonus, 1.0), matched_terms[:6]
 
 
 def filter_relevant_citations(citations: list, question: str,
-                               min_score: float = 0.08, max_sources: int = 4) -> list:
+                               min_score: float = 0.08, max_sources: int = 4,
+                               exact_match_bias: bool = False) -> list:
     """
     Keep only citations that are meaningfully relevant to the user's question.
     Returns an empty list when no citation clears the relevance threshold.
@@ -766,69 +1384,93 @@ def filter_relevant_citations(citations: list, question: str,
     if not citations:
         return []
 
-    scored = [
-        (c, _score_citation(c, question))
-        for c in citations
-    ]
+    scored = []
+    threshold = min_score + (0.02 if exact_match_bias else 0.0)
+    for citation in citations:
+        score, match_terms = _citation_match_details(citation, question, exact_match_bias)
+        annotated = {
+            **citation,
+            "match_score": round(score, 3),
+            "match_terms": match_terms,
+        }
+        scored.append((annotated, score))
     scored.sort(key=lambda x: x[1], reverse=True)
 
     kept = []
     for c, score in scored:
-        if score >= min_score and len(kept) < max_sources:
+        if score >= threshold and len(kept) < max_sources:
             kept.append(c)
 
     return kept
 
 
+def build_query_prompt(question: str, mode: str, retrieval_settings: dict) -> str:
+    exact_clause_instruction = (
+        "Prioritize exact clause language, definitions, and headings that reuse the user's terms."
+        if retrieval_settings.get("exact_match_bias")
+        else "Use the most directly relevant sources even when several related sections appear."
+    )
+    inference_instruction = (
+        "If the retrieved material does not directly resolve the question, say that plainly and stop at the closest supported answer."
+        if retrieval_settings.get("strict_grounding", True)
+        else "If needed, include careful inference, but label it clearly and keep it narrower than the direct source support."
+    )
+    if mode == "rulebook":
+        domain_intro = "You are an expert NBA rules analyst with deep knowledge of basketball regulations."
+        mode_instructions = [
+            "Use only the retrieved rulebook sources provided by the knowledge base to answer the following question.",
+            "For comparisons or scenarios, reason step by step from the cited rules and note any ambiguity that remains.",
+            "Cite specific rules and sections only when they are supported by the retrieved material.",
+            "Do not invent rule numbers, penalties, dollar figures, or procedures.",
+        ]
+    else:
+        operations_instruction = (
+            "Prefer the CBA document and use the Operations Manual only when it is directly relevant."
+            if not retrieval_settings.get("include_operations_manual", True)
+            else "Use both the CBA and Operations Manual when relevant, and label which source each point comes from."
+        )
+        domain_intro = "You are an expert on the NBA Collective Bargaining Agreement (CBA) and the NBA Basketball Operations Manual."
+        mode_instructions = [
+            "Use only the retrieved sources provided by the knowledge base to answer the following question.",
+            operations_instruction,
+            "Explain how multiple CBA articles or salary-cap rules interact when relevant, but distinguish direct support from inference.",
+            "Translate complex financial terms into plain language.",
+            "Do not invent article numbers, salary figures, percentages, or procedural details.",
+        ]
+
+    mode_instruction_lines = "\n".join(
+        f"{idx}. {line}"
+        for idx, line in enumerate(mode_instructions, start=5)
+    )
+
+    return f"""{domain_intro}
+Question: {question}
+
+Instructions:
+1. Base the answer on retrieved sources and prior conversation context only when that context remains consistent with the sources.
+2. {inference_instruction}
+3. Use this exact answer structure:
+   Answer:
+   Direct source support:
+   Careful inference (if any):
+4. {exact_clause_instruction}
+{mode_instruction_lines}
+"""
+
+
 def query_knowledge_base(question: str, knowledge_base_id: str, model_arn: str,
                           mode: str = "rulebook", session_id: str = None,
-                          region_name: str = None):
+                          region_name: str = None, retrieval_settings: dict = None):
     """Query Bedrock Knowledge Base. Returns (response_text, citations, session_id)."""
     client = get_bedrock_client("bedrock-agent-runtime", region_name)
     if not client:
         return "Error: Could not initialise Bedrock client.", [], None
 
+    retrieval_settings = retrieval_settings or _default_retrieval_settings()
     if session_id is None:
         session_id = str(uuid.uuid4())
 
-    if mode == "rulebook":
-        prompt = f"""You are an expert NBA rules analyst with deep knowledge of basketball regulations.
-Use only the retrieved rulebook sources provided by the knowledge base to answer the following question.
-
-Question: {question}
-
-Instructions:
-1. Base the answer on retrieved sources and prior conversation context only when that context remains consistent with the sources.
-2. If the retrieved material does not directly resolve the question, say that plainly and point to the closest relevant rule instead of guessing.
-3. Separate direct support from any careful inference by using these headings exactly:
-   Answer:
-   Direct source support:
-   Careful inference (if any):
-4. For comparisons or scenarios, reason step by step from the cited rules and note any ambiguity that remains.
-5. Cite specific rules and sections only when they are supported by the retrieved material.
-6. Do not invent rule numbers, article numbers, penalties, dollar figures, or procedures.
-
-Answer:"""
-    else:
-        prompt = f"""You are an expert on the NBA Collective Bargaining Agreement (CBA) and the NBA
-Basketball Operations Manual. Use only the retrieved sources provided by the knowledge base to answer the following question.
-
-Question: {question}
-
-Instructions:
-1. Base the answer on retrieved sources and prior conversation context only when that context remains consistent with the sources.
-2. Explicitly note when information comes from the CBA versus the Operations Manual.
-3. If the retrieved material does not directly resolve the question, say that plainly and point to the closest relevant article or section instead of guessing.
-4. Use these headings exactly:
-   Answer:
-   Direct source support:
-   Careful inference (if any):
-5. Explain how multiple CBA articles or salary-cap rules interact when relevant, but distinguish direct support from inference.
-6. Cite specific CBA articles or Operations Manual sections only when supported by the retrieved material.
-7. Do not invent article numbers, salary figures, percentages, or procedural details.
-8. Translate complex financial terms into plain language.
-
-Answer:"""
+    prompt = build_query_prompt(question, mode, retrieval_settings)
 
     params = {
         "input": {"text": prompt},
@@ -837,6 +1479,11 @@ Answer:"""
             "knowledgeBaseConfiguration": {
                 "knowledgeBaseId": knowledge_base_id,
                 "modelArn": model_arn,
+                "retrievalConfiguration": {
+                    "vectorSearchConfiguration": {
+                        "numberOfResults": retrieval_settings.get("number_of_results", 6),
+                    }
+                },
             },
         },
     }
@@ -848,12 +1495,37 @@ Answer:"""
         new_session_id    = resp.get("sessionId", session_id)
         generated_text    = resp["output"]["text"]
         citations         = _extract_citations(resp)
-        citations         = filter_relevant_citations(citations, question)
+        citations         = filter_relevant_citations(
+            citations,
+            question,
+            max_sources=retrieval_settings.get("max_sources", 4),
+            exact_match_bias=retrieval_settings.get("exact_match_bias", False),
+        )
         return generated_text, citations, new_session_id
 
     except ClientError as e:
         code    = e.response["Error"]["Code"]
         message = e.response["Error"]["Message"]
+
+        if code == "ValidationException" and (
+            "retrievalConfiguration" in message
+            or "vectorSearchConfiguration" in message
+            or "numberOfResults" in message
+        ):
+            params["retrieveAndGenerateConfiguration"]["knowledgeBaseConfiguration"].pop("retrievalConfiguration", None)
+            try:
+                resp = client.retrieve_and_generate(**params)
+                new_session_id = resp.get("sessionId", session_id)
+                gen_text = resp["output"]["text"]
+                cits = filter_relevant_citations(
+                    _extract_citations(resp),
+                    question,
+                    max_sources=retrieval_settings.get("max_sources", 4),
+                    exact_match_bias=retrieval_settings.get("exact_match_bias", False),
+                )
+                return gen_text, cits, new_session_id
+            except Exception as retry_err:
+                return f"Retry failed: {retry_err}", [], None
 
         # Retry without session if session/config is stale
         if code == "ValidationException" and (
@@ -865,7 +1537,12 @@ Answer:"""
                 resp           = client.retrieve_and_generate(**params)
                 new_session_id = resp.get("sessionId")
                 gen_text       = resp["output"]["text"]
-                cits           = filter_relevant_citations(_extract_citations(resp), question)
+                cits           = filter_relevant_citations(
+                    _extract_citations(resp),
+                    question,
+                    max_sources=retrieval_settings.get("max_sources", 4),
+                    exact_match_bias=retrieval_settings.get("exact_match_bias", False),
+                )
                 return gen_text, cits, new_session_id
             except Exception as retry_err:
                 return f"Retry failed: {retry_err}", [], None
@@ -874,6 +1551,102 @@ Answer:"""
 
     except Exception as e:
         return f"Error querying knowledge base: {e}", [], session_id
+
+
+def combine_crossbook_answers(question: str, rulebook_text: str, cba_text: str) -> str:
+    rulebook_sections = parse_answer_sections(rulebook_text)
+    cba_sections = parse_answer_sections(cba_text)
+    takeaway_lines = []
+    if rulebook_sections.get("Answer"):
+        takeaway_lines.append(f"Rulebook: {rulebook_sections['Answer']}")
+    if cba_sections.get("Answer"):
+        takeaway_lines.append(f"CBA / Operations: {cba_sections['Answer']}")
+
+    direct_support = []
+    if rulebook_sections.get("Direct source support"):
+        direct_support.append("Rulebook view:\n" + rulebook_sections["Direct source support"])
+    if cba_sections.get("Direct source support"):
+        direct_support.append("CBA / Operations view:\n" + cba_sections["Direct source support"])
+
+    inference_parts = []
+    if rulebook_sections.get("Careful inference"):
+        inference_parts.append("Rulebook inference:\n" + rulebook_sections["Careful inference"])
+    if cba_sections.get("Careful inference"):
+        inference_parts.append("CBA / Operations inference:\n" + cba_sections["Careful inference"])
+
+    answer_block = "\n\n".join(takeaway_lines) if takeaway_lines else (
+        "This topic spans both sources, but neither side returned a confident, grounded answer."
+    )
+    direct_block = "\n\n".join(direct_support) if direct_support else (
+        "The retrieved material did not produce strong direct support in one or both source sets."
+    )
+    inference_block = "\n\n".join(inference_parts) if inference_parts else "No additional inference beyond the direct support."
+
+    return (
+        "Answer:\n"
+        f"{answer_block}\n\n"
+        "Rulebook view:\n"
+        f"{rulebook_sections.get('Answer', 'No grounded rulebook answer was returned.')}\n\n"
+        "CBA / Operations view:\n"
+        f"{cba_sections.get('Answer', 'No grounded CBA / Operations answer was returned.')}\n\n"
+        "Direct source support:\n"
+        f"{direct_block}\n\n"
+        "Careful inference (if any):\n"
+        f"{inference_block}\n\n"
+        "Takeaway:\n"
+        "Use the rulebook for on-court administration and the CBA / Operations materials for roster, contract, discipline, and transaction consequences."
+    )
+
+
+def query_app_mode(question: str, mode: str, runtime_config: dict, retrieval_settings: dict):
+    if mode in ("rulebook", "cba"):
+        cur_session = st.session_state.session_ids.get(mode)
+        response, citations, new_session = query_knowledge_base(
+            question,
+            runtime_config["kb_id"],
+            runtime_config["model_arn"],
+            mode,
+            session_id=cur_session,
+            region_name=runtime_config["region"],
+            retrieval_settings=retrieval_settings,
+        )
+        st.session_state.session_ids[mode] = new_session
+        for citation in citations:
+            citation["source_domain"] = mode
+        return response, citations
+
+    rulebook_config = get_mode_runtime_config("rulebook")
+    cba_config = get_mode_runtime_config("cba")
+
+    rb_response, rb_citations, rb_session = query_knowledge_base(
+        question,
+        rulebook_config["kb_id"],
+        rulebook_config["model_arn"],
+        "rulebook",
+        session_id=st.session_state.session_ids.get("both_rulebook"),
+        region_name=rulebook_config["region"],
+        retrieval_settings=retrieval_settings,
+    )
+    cba_response, cba_citations, cba_session = query_knowledge_base(
+        question,
+        cba_config["kb_id"],
+        cba_config["model_arn"],
+        "cba",
+        session_id=st.session_state.session_ids.get("both_cba"),
+        region_name=cba_config["region"],
+        retrieval_settings=retrieval_settings,
+    )
+
+    st.session_state.session_ids["both_rulebook"] = rb_session
+    st.session_state.session_ids["both_cba"] = cba_session
+
+    for citation in rb_citations:
+        citation["source_domain"] = "rulebook"
+    for citation in cba_citations:
+        citation["source_domain"] = "cba"
+
+    combined = combine_crossbook_answers(question, rb_response, cba_response)
+    return combined, rb_citations + cba_citations
 
 
 # ─────────────────────────────────────────────
@@ -1058,33 +1831,121 @@ def parse_quiz(text: str):
     return q if q["question"] and q["options"] and q["answer"] else None
 
 
+def render_quick_chips(mode: str):
+    st.markdown('<div class="chip-intro">Tap a quick-start topic to jump into the corpus faster.</div>', unsafe_allow_html=True)
+    chip_cols = st.columns(3)
+    for idx, chip in enumerate(QUICK_CHIPS[mode]):
+        with chip_cols[idx % 3]:
+            if st.button(chip, key=f"chip_{mode}_{idx}", use_container_width=True):
+                prompt = (
+                    build_crossbook_prompt(chip)
+                    if mode == "both"
+                    else f"Give me a grounded explanation of {chip.lower()} with the exact clause if available."
+                )
+                queue_prompt(mode, prompt)
+                st.rerun()
+
+
+def render_sidebar_bookmarks(mode: str):
+    bookmarks = get_bookmarks(mode)
+    st.markdown("### 🔖 Bookmarks")
+    if not bookmarks:
+        st.caption("Save strong answers here for quick return trips.")
+        return
+
+    for idx, bookmark in enumerate(bookmarks[-6:][::-1]):
+        st.markdown(
+            f'<div class="bookmark-card"><strong>{html_safe(bookmark["title"])}</strong>'
+            f'<div class="bookmark-meta">{html_safe(bookmark.get("timestamp", ""))}</div></div>',
+            unsafe_allow_html=True,
+        )
+        cols = st.columns(2)
+        with cols[0]:
+            if st.button("Open", key=f"bm_open_{mode}_{bookmark['id']}_{idx}", use_container_width=True):
+                queue_prompt(mode, bookmark.get("question") or bookmark["title"])
+                st.rerun()
+        with cols[1]:
+            if st.button("Reuse", key=f"bm_reuse_{mode}_{bookmark['id']}_{idx}", use_container_width=True):
+                queue_prompt(mode, f"Revisit this topic and update the answer with fresh citations: {bookmark.get('question') or bookmark['title']}")
+                st.rerun()
+
+
+def render_mobile_nav(current_mode: str):
+    links = ['<a href="#assistant-workbench">Workbench</a>', '<a href="#query-starters">Starters</a>']
+    if current_mode != "both":
+        links.append('<a href="#quiz-panel">Quiz</a>')
+    if current_mode == "rulebook":
+        links.append('<a href="#scenario-panel">Scenario</a>')
+    st.markdown(f'<div class="mobile-nav">{"".join(links)}</div>', unsafe_allow_html=True)
+
+
 # ─────────────────────────────────────────────
 # EXPORT HELPER
 # ─────────────────────────────────────────────
-def export_chat(messages: list, mode: str) -> str:
+def export_chat(messages: list, mode: str, export_format: str = "Transcript") -> str:
     t = THEMES[mode]
+    if export_format == "Transcript":
+        lines = [
+            f"# {t['title']}",
+            f"**Mode:** {t['name']}  ",
+            f"**Exported:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            "", "---", "",
+        ]
+        for msg in messages:
+            role  = "🧑 You" if msg["role"] == "user" else f"{t['icon']} Assistant"
+            ts    = f" *{msg['timestamp']}*" if msg.get("timestamp") else ""
+            lines += [f"### {role}{ts}", msg["content"], ""]
+
+            if msg["role"] == "assistant" and msg.get("citations"):
+                seen, srcs = set(), []
+                for c in msg["citations"]:
+                    u = c.get("uri", "")
+                    if u not in seen:
+                        seen.add(u)
+                        srcs.append(f"- {u}")
+                if srcs:
+                    lines += ["**Sources:**"] + srcs + [""]
+
+            lines += ["---", ""]
+        return "\n".join(lines)
+
+    assistant_messages = [msg for msg in messages if msg["role"] == "assistant"]
+    user_messages = [msg for msg in messages if msg["role"] == "user"]
     lines = [
-        f"# {t['title']}",
-        f"**Mode:** {t['name']}  ",
-        f"**Exported:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-        "", "---", "",
+        f"# {export_format}",
+        f"Mode: {t['name']}",
+        f"Exported: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        "",
     ]
-    for msg in messages:
-        role  = "🧑 You" if msg["role"] == "user" else f"{t['icon']} Assistant"
-        ts    = f" *{msg['timestamp']}*" if msg.get("timestamp") else ""
-        lines += [f"### {role}{ts}", msg["content"], ""]
 
-        if msg["role"] == "assistant" and msg.get("citations"):
-            seen, srcs = set(), []
-            for c in msg["citations"]:
-                u = c.get("uri", "")
-                if u not in seen:
-                    seen.add(u)
-                    srcs.append(f"- {u}")
-            if srcs:
-                lines += ["**Sources:**"] + srcs + [""]
+    if export_format == "Scout note":
+        lines += ["## Key Questions"]
+        lines += [f"- {msg['content']}" for msg in user_messages[-8:]] or ["- No questions logged yet."]
+        lines += ["", "## Takeaways"]
+        for msg in assistant_messages[-6:]:
+            answer = parse_answer_sections(msg["content"]).get("Answer", msg["content"])
+            lines.append(f"- {answer}")
+        return "\n".join(lines)
 
-        lines += ["---", ""]
+    if export_format == "Cap memo":
+        lines += ["## Executive Summary"]
+        for msg in assistant_messages[-5:]:
+            sections = parse_answer_sections(msg["content"])
+            lines.append(f"- Issue: {msg.get('question', 'Prior topic')}")
+            lines.append(f"  View: {sections.get('Answer', msg['content'])}")
+            if sections.get("Direct source support"):
+                lines.append(f"  Support: {sections['Direct source support']}")
+            lines.append("")
+        return "\n".join(lines)
+
+    lines += ["## Game Ruling Summary"]
+    for msg in assistant_messages[-5:]:
+        sections = parse_answer_sections(msg["content"])
+        lines.append(f"- Situation: {msg.get('question', 'Prior topic')}")
+        lines.append(f"  Ruling: {sections.get('Answer', msg['content'])}")
+        if sections.get("Direct source support"):
+            lines.append(f"  Rule support: {sections['Direct source support']}")
+        lines.append("")
     return "\n".join(lines)
 
 
@@ -1095,6 +1956,12 @@ def main():
     current_mode = st.session_state.mode
     current_messages = get_messages(current_mode)
     runtime_config = get_mode_runtime_config(current_mode)
+    retrieval_settings = get_retrieval_settings(current_mode)
+    theme = THEMES[current_mode]
+    kb_id = runtime_config["kb_id"]
+    model_arn = runtime_config["model_arn"]
+    quiz_model_id = runtime_config["quiz_model_id"]
+    assistant_history = [msg for msg in current_messages if msg["role"] == "assistant"]
 
     # ──────────────────────────────────────────
     # SIDEBAR
@@ -1122,45 +1989,81 @@ def main():
             st.rerun()
 
         st.markdown("---")
-
-        theme = THEMES[current_mode]
-        kb_id = runtime_config["kb_id"]
-        model_arn = runtime_config["model_arn"]
-        quiz_model_id = runtime_config["quiz_model_id"]
+        st.markdown("### 🔎 Retrieval")
+        retrieval_settings["strict_grounding"] = st.toggle(
+            "Strict grounding",
+            value=retrieval_settings["strict_grounding"],
+            key=f"strict_grounding_{current_mode}",
+            help="Prefer no-answer states over speculative synthesis.",
+        )
+        retrieval_settings["exact_match_bias"] = st.toggle(
+            "Exact clause bias",
+            value=retrieval_settings["exact_match_bias"],
+            key=f"exact_bias_{current_mode}",
+            help="Prefer exact definitions and clause wording that reuse your terms.",
+        )
+        retrieval_settings["number_of_results"] = st.slider(
+            "Results to retrieve",
+            min_value=3,
+            max_value=12,
+            value=retrieval_settings["number_of_results"],
+            key=f"results_{current_mode}",
+        )
+        retrieval_settings["max_sources"] = st.slider(
+            "Sources to show",
+            min_value=1,
+            max_value=6,
+            value=retrieval_settings["max_sources"],
+            key=f"sources_{current_mode}",
+        )
+        if current_mode in ("cba", "both"):
+            retrieval_settings["include_operations_manual"] = st.toggle(
+                "Include Operations Manual",
+                value=retrieval_settings["include_operations_manual"],
+                key=f"ops_manual_{current_mode}",
+            )
 
         st.markdown("---")
 
         # Stats
         st.markdown("### 📊 Stats")
         q_count = len([m for m in current_messages if m["role"] == "user"])
+        bookmark_count = len(get_bookmarks(current_mode))
+        feedback_count = len(get_feedback_store(current_mode))
         st.markdown(f"""
         <div class="metric-card">
             <h2 style="font-size:2rem;">{theme['icon']} {q_count}</h2>
             <p>Questions Asked</p>
         </div>""", unsafe_allow_html=True)
+        st.caption(f"{bookmark_count} bookmarks saved | {feedback_count} feedback signals")
 
         st.markdown("---")
 
-        # Tips
         st.markdown("### 💡 Tips")
         if current_mode == "rulebook":
             st.markdown("""
 - Ask about specific rules by number
-- Ask follow-up questions (memory is on)
-- Use **Scenario Simulator** for play rulings
-- Try **Quiz Me** to test your knowledge
+- Use the Scenario Builder for play rulings
+- Tap `Exact clause` after a response for quote-first answers
+- Use the Workbench to compare two rules quickly
+""")
+        elif current_mode == "both":
+            st.markdown("""
+- Use this mode for on-court vs off-court consequences
+- Compare gameplay rules with roster, salary, or discipline impacts
+- Check the source rail to see which lane each source came from
+- Use the Workbench to compare both source families side by side
 """)
         else:
             st.markdown("""
-- Ask about CBA articles or salary-cap math
-- Source badges show CBA vs Operations Manual
-- Ask follow-up questions (memory is on)
-- Try **Quiz Me** to test your CBA knowledge
+- Ask about CBA articles, waivers, or salary-cap math
+- Toggle Operations Manual coverage when you want only the CBA
+- Use `Analyst memo` for front-office style answers
+- Browse clauses by article or topic from the Workbench
 """)
 
         st.markdown("---")
 
-        # Actions
         st.markdown("### ⚡ Actions")
         c1, c2 = st.columns(2)
         with c1:
@@ -1171,92 +2074,190 @@ def main():
             if st.button("🔄 Refresh", use_container_width=True):
                 st.rerun()
 
-        # Export
+        st.markdown("---")
+        st.markdown("### 📦 Export")
+        st.session_state.export_format = st.selectbox(
+            "Export style",
+            EXPORT_FORMATS,
+            index=EXPORT_FORMATS.index(st.session_state.export_format),
+            key="export_style",
+        )
         if current_messages:
-            md_export = export_chat(current_messages, current_mode)
-            ts_str    = datetime.now().strftime("%Y%m%d_%H%M")
+            md_export = export_chat(current_messages, current_mode, st.session_state.export_format)
+            ts_str = datetime.now().strftime("%Y%m%d_%H%M")
             st.download_button(
-                label="📥 Export Chat",
+                label="📥 Export Session",
                 data=md_export,
                 file_name=f"nba_{current_mode}_{ts_str}.md",
                 mime="text/markdown",
                 use_container_width=True,
             )
 
+        st.markdown("---")
+        render_sidebar_bookmarks(current_mode)
+
     # ──────────────────────────────────────────
     # HEADER
     # ──────────────────────────────────────────
-    theme = THEMES[current_mode]
-    st.markdown(f'<h1>{theme["title"]}</h1>', unsafe_allow_html=True)
-    st.markdown(f'<p class="subtitle">{theme["subtitle"]}</p>', unsafe_allow_html=True)
+    st.markdown('<div id="assistant-workbench"></div>', unsafe_allow_html=True)
+    st.markdown(
+        f"""
+        <div class="hero-shell">
+            <div class="hero-kicker">{theme["name"]}</div>
+            <div class="hero-title">{theme["title"]}</div>
+            <div class="hero-sub">{theme["subtitle"]}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    render_mobile_nav(current_mode)
+
+    st.markdown('<div id="query-starters"></div>', unsafe_allow_html=True)
+    st.markdown("### ⚡ Query Starters")
+    render_quick_chips(current_mode)
+    starter_cols = st.columns(2)
+    for idx, ex in enumerate(theme["examples"]):
+        with starter_cols[idx % 2]:
+            if st.button(f"{theme['icon']} {ex}", key=f"starter_{current_mode}_{idx}", use_container_width=True):
+                queue_prompt(current_mode, ex)
+                st.rerun()
     st.markdown("---")
+
+    with st.expander("🧰 Assistant Workbench", expanded=False):
+        compare_col, browse_col = st.columns(2, gap="large")
+        with compare_col:
+            st.markdown("#### Compare")
+            compare_tool = st.selectbox(
+                "Comparison tool",
+                ["Compare two rules/articles", "Rulebook vs CBA impact", "Answer vs exact source text"],
+                key=f"compare_tool_{current_mode}",
+            )
+            if compare_tool == "Compare two rules/articles":
+                left_term = st.text_input("First rule/article/topic", key=f"cmp_left_{current_mode}")
+                right_term = st.text_input("Second rule/article/topic", key=f"cmp_right_{current_mode}")
+                if st.button("Run comparison", key=f"cmp_run_{current_mode}", use_container_width=True) and left_term.strip() and right_term.strip():
+                    queue_prompt(current_mode, build_compare_prompt(left_term.strip(), right_term.strip(), current_mode))
+                    st.rerun()
+            elif compare_tool == "Rulebook vs CBA impact":
+                topic = st.text_input("Crossbook topic", key=f"cross_topic_{current_mode}")
+                if st.button("Compare crossbook impact", key=f"cross_compare_{current_mode}", use_container_width=True) and topic.strip():
+                    st.session_state.mode = "both"
+                    queue_prompt("both", build_crossbook_prompt(topic.strip()))
+                    st.rerun()
+            else:
+                if assistant_history:
+                    recent_map = {
+                        get_message_id(msg): (msg.get("question") or msg["content"][:60])
+                        for msg in assistant_history[-8:]
+                    }
+                    selected_message = st.selectbox(
+                        "Recent answer",
+                        options=list(recent_map.keys()),
+                        format_func=lambda key: recent_map[key],
+                        key=f"answer_compare_{current_mode}",
+                    )
+                    if st.button("Quote-check this answer", key=f"quote_check_{current_mode}", use_container_width=True):
+                        chosen = next(msg for msg in assistant_history[-8:] if get_message_id(msg) == selected_message)
+                        queue_prompt(
+                            current_mode,
+                            f"For the earlier question '{chosen.get('question', 'this topic')}', show the exact source text and explain whether your prior answer stayed within that language.",
+                        )
+                        st.rerun()
+                else:
+                    st.caption("Ask at least one question to compare an answer against source text.")
+
+        with browse_col:
+            st.markdown("#### Document Explorer")
+            browse_type = st.selectbox(
+                "Browse by",
+                ["Rule", "Section", "Article", "Part", "Topic"],
+                key=f"browse_type_{current_mode}",
+            )
+            preset = st.selectbox(
+                "Suggested destination",
+                DOC_BROWSE_PRESETS[current_mode],
+                key=f"browse_preset_{current_mode}",
+            )
+            browse_value = st.text_input("Or enter your own target", value=preset, key=f"browse_value_{current_mode}")
+            if st.button("Explore source", key=f"browse_run_{current_mode}", use_container_width=True) and browse_value.strip():
+                queue_prompt(current_mode, build_doc_browse_prompt(browse_type, browse_value.strip(), current_mode))
+                st.rerun()
 
     # ──────────────────────────────────────────
     # QUIZ ME
     # ──────────────────────────────────────────
+    st.markdown('<div id="quiz-panel"></div>', unsafe_allow_html=True)
     with st.expander("🎯 Quiz Me!", expanded=False):
-        topics = QUIZ_TOPICS[current_mode]
-        topic  = st.selectbox("Choose a topic:", topics, key="quiz_topic_select")
+        if current_mode == "both":
+            st.info("Quiz mode is available in single-source views so each question can stay tightly grounded.")
+        else:
+            topics = QUIZ_TOPICS[current_mode]
+            topic  = st.selectbox("Choose a topic:", topics, key="quiz_topic_select")
 
-        if st.button("🎲 Generate Question", use_container_width=True, key="gen_quiz"):
-            reset_quiz_state(current_mode)
-            with st.spinner("Generating quiz question…"):
-                raw_resp, _, _ = generate_quiz_question(
-                    current_mode,
-                    topic,
-                    kb_id,
-                    quiz_model_id,
-                    runtime_config["region"],
+            if st.button("🎲 Generate Question", use_container_width=True, key="gen_quiz"):
+                reset_quiz_state(current_mode)
+                with st.spinner("Generating quiz question…"):
+                    raw_resp, _, _ = generate_quiz_question(
+                        current_mode,
+                        topic,
+                        kb_id,
+                        quiz_model_id,
+                        runtime_config["region"],
+                    )
+                    parsed = parse_quiz(raw_resp)
+                    if parsed:
+                        get_quiz_state(current_mode)["current"] = parsed
+                    else:
+                        get_quiz_state(current_mode)["raw"] = raw_resp
+
+            quiz_state = get_quiz_state(current_mode)
+            quiz = quiz_state["current"]
+            if quiz:
+                st.markdown(f"**Q: {quiz['question']}**")
+                user_ans = st.radio(
+                    "Your answer:",
+                    options=list(quiz["options"].keys()),
+                    format_func=lambda x: f"{x}) {quiz['options'][x]}",
+                    key=f"quiz_radio_{quiz['question'][:30]}",
                 )
-                parsed = parse_quiz(raw_resp)
-                if parsed:
-                    get_quiz_state(current_mode)["current"] = parsed
+                if st.button("✅ Submit Answer", key="submit_quiz"):
+                    quiz_state["show_answer"] = True
+
+                if quiz_state["show_answer"]:
+                    correct = quiz["answer"].strip().upper()
+                    if user_ans == correct:
+                        st.success(f"🎉 Correct! The answer is **{correct}**.")
+                    else:
+                        st.error(f"❌ Not quite. The correct answer is **{correct}**.")
+                    if quiz.get("explanation"):
+                        st.info(f"📖 {quiz['explanation']}")
+
+            elif quiz_state["raw"]:
+                if quiz_state["raw"].startswith("Quiz unavailable"):
+                    st.warning(quiz_state["raw"])
+                elif quiz_state["raw"].startswith("Error generating quiz"):
+                    st.error(quiz_state["raw"])
                 else:
-                    get_quiz_state(current_mode)["raw"] = raw_resp
-
-        quiz_state = get_quiz_state(current_mode)
-        quiz = quiz_state["current"]
-        if quiz:
-            st.markdown(f"**Q: {quiz['question']}**")
-            user_ans = st.radio(
-                "Your answer:",
-                options=list(quiz["options"].keys()),
-                format_func=lambda x: f"{x}) {quiz['options'][x]}",
-                key=f"quiz_radio_{quiz['question'][:30]}",
-            )
-            if st.button("✅ Submit Answer", key="submit_quiz"):
-                quiz_state["show_answer"] = True
-
-            if quiz_state["show_answer"]:
-                correct = quiz["answer"].strip().upper()
-                if user_ans == correct:
-                    st.success(f"🎉 Correct! The answer is **{correct}**.")
-                else:
-                    st.error(f"❌ Not quite. The correct answer is **{correct}**.")
-                if quiz.get("explanation"):
-                    st.info(f"📖 {quiz['explanation']}")
-
-        elif quiz_state["raw"]:
-            # Structured parse failed – show raw response
-            if quiz_state["raw"].startswith("Quiz unavailable"):
-                st.warning(quiz_state["raw"])
-            elif quiz_state["raw"].startswith("Error generating quiz"):
-                st.error(quiz_state["raw"])
-            else:
-                st.markdown(quiz_state["raw"])
+                    st.markdown(quiz_state["raw"])
 
     # ──────────────────────────────────────────
     # SCENARIO SIMULATOR (Rulebook only)
     # ──────────────────────────────────────────
     if current_mode == "rulebook":
+        st.markdown('<div id="scenario-panel"></div>', unsafe_allow_html=True)
         with st.expander("🏀 Scenario Simulator — Get a rules ruling", expanded=False):
-            sc1, sc2 = st.columns(2)
+            sc1, sc2, sc3 = st.columns(3)
             with sc1:
                 play_type  = st.selectbox("Play type", [
                     "Drive to basket", "Three-point attempt", "Post play",
                     "Pick and roll", "Inbound play", "Jump ball", "Free throw", "Other",
                 ], key="sim_play")
                 game_clock = st.text_input("Game clock (e.g. 0:04)", key="sim_gclk")
+                possession_state = st.selectbox(
+                    "Possession state",
+                    ["Team control", "Loose ball", "Rebound", "Throw-in", "Jump ball", "Unsure"],
+                    key="sim_possession",
+                )
             with sc2:
                 shot_clock = st.selectbox("Shot clock", [
                     "Active (>0)", "Expired (0)", "Not applicable",
@@ -1265,6 +2266,22 @@ def main():
                     "Paint/Key", "Mid-range", "Three-point line",
                     "Half court", "Backcourt", "Out-of-bounds area",
                 ], key="sim_pos")
+                contact_type = st.selectbox(
+                    "Contact / foul type",
+                    ["No contact", "Incidental contact", "Personal foul", "Loose-ball foul", "Flagrant", "Technical", "Unsure"],
+                    key="sim_contact",
+                )
+            with sc3:
+                review_status = st.selectbox(
+                    "Replay / challenge status",
+                    ["No review", "Coach's challenge available", "Automatic replay trigger", "Under review", "Unsure"],
+                    key="sim_review",
+                )
+                outcome_state = st.selectbox(
+                    "Result of play",
+                    ["Shot attempt", "Made basket", "Missed basket", "Turnover", "Dead ball", "Timeout / substitution", "Unsure"],
+                    key="sim_outcome",
+                )
 
             situation = st.text_area(
                 "Describe what happened:",
@@ -1280,8 +2297,13 @@ def main():
                     f"Court Position: {court_pos}\n"
                     f"Game Clock: {game_clock or 'Not specified'}\n"
                     f"Shot Clock: {shot_clock}\n\n"
+                    f"Possession State: {possession_state}\n"
+                    f"Contact Type: {contact_type}\n"
+                    f"Replay / Challenge Status: {review_status}\n"
+                    f"Result of Play: {outcome_state}\n\n"
                     f"Situation: {situation}\n\n"
-                    f"Please provide a clear ruling on this situation, citing the exact rules that apply."
+                    "Please provide a clear ruling on this situation, cite the exact rules that apply, "
+                    "and note any replay or procedural wrinkles if they matter."
                 )
                 st.session_state.pending_prompts[current_mode] = scenario_prompt
                 st.rerun()
@@ -1298,66 +2320,36 @@ def main():
                 <p style="font-size:1.1rem;">
                     {"Ask me anything about NBA rules, regulations, and gameplay."
                      if current_mode == "rulebook"
+                     else "Ask crossbook questions that connect on-court rules with contracts, roster rules, and league operations."
+                     if current_mode == "both"
                      else "Ask me about NBA contracts, salary cap, and league business rules."}
                 </p>
             </div>""", unsafe_allow_html=True)
-
-            st.markdown("### 🎯 Example Questions — click to ask:")
-            ex1, ex2 = st.columns(2)
-            for i, ex in enumerate(theme["examples"]):
-                with (ex1 if i % 2 == 0 else ex2):
-                    if st.button(f"{theme['icon']} {ex}", key=f"ex_{i}", use_container_width=True):
-                        st.session_state.pending_prompts[current_mode] = ex
-                        st.rerun()
-
-            st.markdown("---")
-            st.markdown("**💡 Tip:** Click an example above or type your question in the box below!")
+            st.markdown("**💡 Tip:** Use the chips or starter prompts above, then refine with the Workbench.")
 
     # ──────────────────────────────────────────
     # CHAT HISTORY
     # ──────────────────────────────────────────
     else:
-        for msg in current_messages:
+        for idx, msg in enumerate(current_messages):
             with st.chat_message(msg["role"]):
-                st.markdown(msg["content"].replace("$", r"\$"))
-
-                # Timestamp
-                if msg.get("timestamp"):
-                    st.markdown(f'<div class="msg-ts">🕐 {msg["timestamp"]}</div>', unsafe_allow_html=True)
-
                 if msg["role"] == "assistant":
-                    # Copy response
-                    with st.expander("📋 Copy response"):
-                        st.code(msg["content"], language=None)
-
-                    # Citations
-                    if msg.get("citations"):
-                        st.markdown("---")
-                        st.markdown("### 📚 Sources")
-                        render_citations(msg["citations"], current_mode)
-
-                    # Cross-mode suggestion (stored at render time)
-                    if msg.get("cross_mode"):
-                        other = msg["cross_mode"]
-                        ot    = THEMES[other]
-                        st.markdown(
-                            f'<div class="cross-mode-box">💡 <strong>Did you know?</strong> '
-                            f"This topic also has implications in <strong>{ot['name']}</strong>. "
-                            f"Switch modes to explore further!</div>",
-                            unsafe_allow_html=True,
-                        )
-                        if st.button(f"Switch to {ot['name']} →", key=f"sw_{msg.get('timestamp',id(msg))}"):
-                            st.session_state.mode = other
-                            st.rerun()
+                    msg.setdefault("id", f"history-{idx}-{get_message_id(msg)}")
+                    render_assistant_message(msg, current_mode)
+                else:
+                    st.markdown(safe_markdown(msg["content"]))
+                    if msg.get("timestamp"):
+                        st.markdown(f'<div class="msg-ts">🕐 {msg["timestamp"]}</div>', unsafe_allow_html=True)
 
     # ──────────────────────────────────────────
     # CHAT INPUT
     # ──────────────────────────────────────────
-    placeholder = (
-        "Ask a question about NBA rules…"
-        if current_mode == "rulebook"
-        else "Ask about contracts, salary cap, or CBA rules…"
-    )
+    if current_mode == "rulebook":
+        placeholder = "Ask a question about NBA rules…"
+    elif current_mode == "both":
+        placeholder = "Compare gameplay rules with CBA / operations impacts…"
+    else:
+        placeholder = "Ask about contracts, salary cap, or CBA rules…"
 
     typed_prompt = st.chat_input(placeholder)
 
@@ -1370,17 +2362,19 @@ def main():
 
     if prompt:
         ts = datetime.now().strftime("%b %d, %I:%M %p")
-        current_messages.append({"role": "user", "content": prompt, "timestamp": ts})
+        current_messages.append({"id": make_message_id(), "role": "user", "content": prompt, "timestamp": ts})
 
         with st.chat_message("user"):
-            st.markdown(prompt.replace("$", r"\$"))
+            st.markdown(safe_markdown(prompt))
             st.markdown(f'<div class="msg-ts">🕐 {ts}</div>', unsafe_allow_html=True)
 
         # ── Animated loading card inside the assistant bubble ────────────────────
-        loading_icon  = "🏀" if current_mode == "rulebook" else "💰"
+        loading_icon  = "🏀" if current_mode == "rulebook" else "🏀 + 💰" if current_mode == "both" else "💰"
         loading_label = (
             "Searching the NBA Rulebook…"
             if current_mode == "rulebook"
+            else "Searching both the Rulebook and CBA lanes…"
+            if current_mode == "both"
             else "Searching the CBA & Salary Cap docs…"
         )
         loading_html = f"""
@@ -1398,58 +2392,26 @@ def main():
             loading_placeholder = st.empty()
             loading_placeholder.markdown(loading_html, unsafe_allow_html=True)
 
-            cur_session = st.session_state.session_ids.get(current_mode)
-            response, citations, new_session = query_knowledge_base(
-                prompt,
-                kb_id,
-                model_arn,
-                current_mode,
-                session_id=cur_session,
-                region_name=runtime_config["region"],
-            )
-            st.session_state.session_ids[current_mode] = new_session
+            response, citations = query_app_mode(prompt, current_mode, runtime_config, retrieval_settings)
 
             # Swap loading card for the actual response
             loading_placeholder.empty()
 
             resp_ts = datetime.now().strftime("%b %d, %I:%M %p")
-            st.markdown(response.replace("$", r"\$"))
-            st.markdown(f'<div class="msg-ts">🕐 {resp_ts}</div>', unsafe_allow_html=True)
-
-            # Copy response
-            with st.expander("📋 Copy response"):
-                st.code(response, language=None)
-
-            # Citations
-            if citations:
-                st.markdown("---")
-                st.markdown("### 📚 Sources")
-                render_citations(citations, current_mode)
-            else:
-                st.caption("No sufficiently relevant source excerpts were returned for this answer.")
-
-            # Cross-mode detection & suggestion
-            cross = detect_cross_mode(response, current_mode)
-            if cross:
-                ot = THEMES[cross]
-                st.markdown(
-                    f'<div class="cross-mode-box">💡 <strong>Did you know?</strong> '
-                    f"This topic also has implications in <strong>{ot['name']}</strong>. "
-                    f"Switch modes to explore further!</div>",
-                    unsafe_allow_html=True,
-                )
-                if st.button(f"Switch to {ot['name']} →", key=f"switch_new_{resp_ts}"):
-                    st.session_state.mode = cross
-                    st.rerun()
+            cross = detect_cross_mode(response, current_mode) if current_mode in ("rulebook", "cba") else None
+            response_msg = {
+                "id": make_message_id(),
+                "role": "assistant",
+                "question": prompt,
+                "content": response,
+                "citations": citations,
+                "timestamp": resp_ts,
+                "cross_mode": cross,
+            }
+            render_assistant_message(response_msg, current_mode)
 
         # Store assistant message
-        current_messages.append({
-            "role":       "assistant",
-            "content":    response,
-            "citations":  citations,
-            "timestamp":  resp_ts,
-            "cross_mode": cross,
-        })
+        current_messages.append(response_msg)
 
 
 if __name__ == "__main__":
