@@ -5,6 +5,7 @@ import uuid
 import re
 import os
 import html
+import time
 from datetime import datetime
 from botocore.exceptions import ClientError, ParamValidationError
 
@@ -567,6 +568,32 @@ def starter_prompt_for(mode: str, label: str) -> str:
     return f"{label} Explain the rule clearly and cite the exact rule language if available."
 
 
+def loading_state_for(mode: str) -> dict:
+    if mode == "rulebook":
+        return {
+            "icon": "🏀",
+            "label": "Searching the NBA Rulebook…",
+            "sub": "Locating the governing rule, checking definitions and exceptions, and preparing a clear ruling.",
+            "steps": ["Finding the right rule", "Checking exceptions", "Drafting the ruling"],
+            "min_display_seconds": 0.75,
+        }
+    if mode == "both":
+        return {
+            "icon": "🏀 + 💰",
+            "label": "Searching both the Rulebook and CBA lanes…",
+            "sub": "Cross-checking gameplay rules against roster, contract, and operations language.",
+            "steps": ["Pulling Rulebook sources", "Pulling CBA sources", "Stitching both views together"],
+            "min_display_seconds": 0.65,
+        }
+    return {
+        "icon": "💰",
+        "label": "Searching the CBA & Salary Cap docs…",
+        "sub": "Large CBA lookups can take a bit longer while the app matches clauses and trade / cap terminology.",
+        "steps": ["Finding the clause", "Checking cap mechanics", "Writing the takeaway"],
+        "min_display_seconds": 0.65,
+    }
+
+
 def expand_query_for_retrieval(question: str, mode: str) -> str:
     expansions = RETRIEVAL_EXPANSIONS.get(mode, {})
     question_lower = question.lower()
@@ -937,6 +964,26 @@ textarea::placeholder, input::placeholder {{
     color: #888 !important;
     -webkit-text-fill-color: #888 !important;
 }}
+.loading-steps {{
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 0.45rem;
+    margin-top: 0.9rem;
+}}
+.loading-step {{
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    border-radius: 999px;
+    padding: 0.28rem 0.65rem;
+    font-size: 0.74rem;
+    font-weight: 700;
+    color: {p} !important;
+    -webkit-text-fill-color: {p} !important;
+    border: 1px solid {p}33;
+    background: {p}12;
+}}
 .loading-dots span {{
     display: inline-block;
     width: 6px; height: 6px;
@@ -968,6 +1015,24 @@ textarea::placeholder, input::placeholder {{
     color: {text} !important;
     opacity: 0.82;
     margin-bottom: 0.45rem;
+}}
+.thinking-steps {{
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.45rem;
+    margin-bottom: 0.55rem;
+}}
+.thinking-step {{
+    display: inline-flex;
+    align-items: center;
+    border-radius: 999px;
+    padding: 0.26rem 0.6rem;
+    font-size: 0.74rem;
+    font-weight: 700;
+    color: {p} !important;
+    -webkit-text-fill-color: {p} !important;
+    border: 1px solid {p}33;
+    background: {p}12;
 }}
 .thinking-track {{
     width: 100%;
@@ -2670,25 +2735,23 @@ def main():
 
         # ── Animated loading card inside the assistant bubble ────────────────────
         status_placeholder = st.empty()
-        loading_icon  = "🏀" if current_mode == "rulebook" else "🏀 + 💰" if current_mode == "both" else "💰"
-        loading_label = (
-            "Searching the NBA Rulebook…"
-            if current_mode == "rulebook"
-            else "Searching both the Rulebook and CBA lanes…"
-            if current_mode == "both"
-            else "Searching the CBA & Salary Cap docs…"
+        loading_state = loading_state_for(current_mode)
+        loading_icon = loading_state["icon"]
+        loading_label = loading_state["label"]
+        loading_sub = loading_state["sub"]
+        loading_steps_html = "".join(
+            f'<span class="thinking-step">{html.escape(step)}</span>'
+            for step in loading_state["steps"]
         )
-        loading_sub = (
-            "Parsing the rule language and preparing a ruling."
-            if current_mode == "rulebook"
-            else "Cross-checking both source families and stitching the views together."
-            if current_mode == "both"
-            else "Large CBA lookups can take a bit longer while the app matches clauses and trade / cap terminology."
+        loading_card_steps_html = "".join(
+            f'<span class="loading-step">{html.escape(step)}</span>'
+            for step in loading_state["steps"]
         )
         thinking_banner_html = f"""
 <div class="thinking-banner">
     <div class="thinking-title">{loading_label}</div>
     <div class="thinking-sub">{loading_sub}</div>
+    <div class="thinking-steps">{loading_steps_html}</div>
     <div class="thinking-track"></div>
 </div>"""
         loading_html = f"""
@@ -2697,6 +2760,7 @@ def main():
     <div class="loading-ring"></div>
     <div class="loading-label">{loading_label}</div>
     <div class="loading-sub">{loading_sub}</div>
+    <div class="loading-steps">{loading_card_steps_html}</div>
     <div class="loading-dots" style="margin-top:0.8rem;">
         <span></span><span></span><span></span>
     </div>
@@ -2707,7 +2771,12 @@ def main():
             status_placeholder.markdown(thinking_banner_html, unsafe_allow_html=True)
             loading_placeholder.markdown(loading_html, unsafe_allow_html=True)
 
+            load_started = time.perf_counter()
             response, citations = query_app_mode(prompt, current_mode, runtime_config, retrieval_settings)
+            elapsed = time.perf_counter() - load_started
+            min_display_seconds = loading_state.get("min_display_seconds", 0.0)
+            if elapsed < min_display_seconds:
+                time.sleep(min_display_seconds - elapsed)
 
             # Swap loading card for the actual response
             loading_placeholder.empty()
