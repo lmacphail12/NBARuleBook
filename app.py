@@ -6,7 +6,7 @@ import re
 import os
 import html
 from datetime import datetime
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError, ParamValidationError
 
 # ─────────────────────────────────────────────
 # PAGE CONFIG
@@ -1458,6 +1458,22 @@ Instructions:
 """
 
 
+def run_retrieve_and_generate(client, params: dict):
+    """Call Bedrock retrieve_and_generate, retrying without unsupported retrieval tuning fields."""
+    try:
+        return client.retrieve_and_generate(**params)
+    except ParamValidationError as e:
+        message = str(e)
+        if (
+            "retrievalConfiguration" in message
+            or "vectorSearchConfiguration" in message
+            or "numberOfResults" in message
+        ):
+            params["retrieveAndGenerateConfiguration"]["knowledgeBaseConfiguration"].pop("retrievalConfiguration", None)
+            return client.retrieve_and_generate(**params)
+        raise
+
+
 def query_knowledge_base(question: str, knowledge_base_id: str, model_arn: str,
                           mode: str = "rulebook", session_id: str = None,
                           region_name: str = None, retrieval_settings: dict = None):
@@ -1491,7 +1507,7 @@ def query_knowledge_base(question: str, knowledge_base_id: str, model_arn: str,
         params["sessionId"] = session_id
 
     try:
-        resp              = client.retrieve_and_generate(**params)
+        resp              = run_retrieve_and_generate(client, params)
         new_session_id    = resp.get("sessionId", session_id)
         generated_text    = resp["output"]["text"]
         citations         = _extract_citations(resp)
@@ -1514,7 +1530,7 @@ def query_knowledge_base(question: str, knowledge_base_id: str, model_arn: str,
         ):
             params["retrieveAndGenerateConfiguration"]["knowledgeBaseConfiguration"].pop("retrievalConfiguration", None)
             try:
-                resp = client.retrieve_and_generate(**params)
+                resp = run_retrieve_and_generate(client, params)
                 new_session_id = resp.get("sessionId", session_id)
                 gen_text = resp["output"]["text"]
                 cits = filter_relevant_citations(
@@ -1534,7 +1550,7 @@ def query_knowledge_base(question: str, knowledge_base_id: str, model_arn: str,
         ):
             params.pop("sessionId", None)
             try:
-                resp           = client.retrieve_and_generate(**params)
+                resp           = run_retrieve_and_generate(client, params)
                 new_session_id = resp.get("sessionId")
                 gen_text       = resp["output"]["text"]
                 cits           = filter_relevant_citations(
@@ -1548,6 +1564,9 @@ def query_knowledge_base(question: str, knowledge_base_id: str, model_arn: str,
                 return f"Retry failed: {retry_err}", [], None
 
         return f"AWS Error ({code}): {message}", [], session_id
+
+    except ParamValidationError as e:
+        return f"Error querying knowledge base: {e}", [], session_id
 
     except Exception as e:
         return f"Error querying knowledge base: {e}", [], session_id
