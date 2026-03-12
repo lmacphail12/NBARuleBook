@@ -1685,6 +1685,134 @@ def query_knowledge_base(question: str, knowledge_base_id: str, model_arn: str,
         return f"Error querying knowledge base: {e}", [], session_id
 
 
+def is_low_signal_chunk(text: str) -> bool:
+    lower = text.lower().strip()
+    if not lower:
+        return True
+    if "table of contents" in lower:
+        return True
+
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    toc_like = 0
+    for line in lines:
+        if "..." in line or re.match(r"^(rule|section|article|part)\b", line.lower()):
+            toc_like += 1
+    return len(lines) >= 3 and toc_like >= max(3, int(len(lines) * 0.6))
+
+
+def build_manual_retrieval_queries(question: str, mode: str) -> list:
+    queries = [question]
+    expanded = expand_query_for_retrieval(question, mode)
+    if expanded != question and "Retrieval hints:" in expanded:
+        queries.append(expanded.split("Retrieval hints:", 1)[1].replace(";", " "))
+
+    lower = question.lower()
+    if mode == "rulebook" and "foul" in lower and "violation" in lower:
+        queries.extend([
+            "foul definition nba rulebook",
+            "violation definition nba rulebook",
+            "personal foul definition rulebook",
+            "technical foul definition rulebook",
+        ])
+
+    unique = []
+    seen = set()
+    for query in queries:
+        cleaned = query.strip()
+        if cleaned and cleaned not in seen:
+            seen.add(cleaned)
+            unique.append(cleaned)
+    return unique[:5]
+
+
+def build_manual_answer_prompt(question: str, mode: str, retrieval_settings: dict, source_text: str) -> str:
+    base_prompt = build_query_prompt(question, mode, retrieval_settings).rsplit("Answer:", 1)[0].rstrip()
+    return (
+        f"{base_prompt}\n\n"
+        "Use ONLY the source excerpts below. Do not rely on outside knowledge. "
+        "If the excerpts still do not contain enough information, say exactly what is missing.\n\n"
+        f"SOURCE EXCERPTS:\n{source_text}\n\n"
+        "Answer:"
+    )
+
+
+def manual_retrieve_and_answer(question: str, knowledge_base_id: str, model_arn: str,
+                               mode: str, region_name: str, retrieval_settings: dict):
+    rag_client = get_bedrock_client("bedrock-agent-runtime", region_name)
+    runtime_client = get_bedrock_runtime_client(region_name)
+    if not rag_client or not runtime_client:
+        return None, []
+
+    raw_citations = []
+    seen = set()
+    for retrieval_query in build_manual_retrieval_queries(question, mode):
+        try:
+            retrieval_resp = rag_client.retrieve(
+                knowledgeBaseId=knowledge_base_id,
+                retrievalQuery={"text": retrieval_query},
+                retrievalConfiguration={
+                    "vectorSearchConfiguration": {
+                        "numberOfResults": max(retrieval_settings.get("number_of_results", 6), 6),
+                    }
+                },
+            )
+        except Exception:
+            continue
+
+        for result in retrieval_resp.get("retrievalResults", []):
+            text = result.get("content", {}).get("text", "").strip()
+            if is_low_signal_chunk(text):
+                continue
+
+            location = result.get("location", {}).get("s3Location", {})
+            uri = location.get("uri", "Unknown source")
+            metadata = result.get("metadata", {})
+            fingerprint = (text[:180], uri.split("#")[0])
+            if fingerprint in seen:
+                continue
+            seen.add(fingerprint)
+            raw_citations.append({
+                "content": text,
+                "uri": uri,
+                "metadata": metadata,
+            })
+
+    filtered_citations = filter_relevant_citations(
+        raw_citations,
+        question,
+        max_sources=max(retrieval_settings.get("max_sources", 4), 4),
+        exact_match_bias=True,
+    )
+    if not filtered_citations:
+        return None, []
+
+    for citation in filtered_citations:
+        citation["source_domain"] = mode
+
+    source_blocks = []
+    for citation in filtered_citations:
+        label = citation_title(citation, mode)
+        source_blocks.append(f"[{label}]\n{citation['content']}")
+    prompt = build_manual_answer_prompt(question, mode, retrieval_settings, "\n\n---\n\n".join(source_blocks))
+
+    try:
+        response = runtime_client.invoke_model(
+            modelId=model_arn,
+            contentType="application/json",
+            accept="application/json",
+            body=json.dumps({
+                "anthropic_version": "bedrock-2023-05-31",
+                "max_tokens": 1200,
+                "messages": [{"role": "user", "content": prompt}],
+            }),
+        )
+        result = json.loads(response["body"].read())
+        text = result.get("content", [{}])[0].get("text", "")
+        return text, filtered_citations
+    except Exception:
+        return None, filtered_citations
+
+
 def combine_crossbook_answers(question: str, rulebook_text: str, cba_text: str) -> str:
     rulebook_sections = parse_answer_sections(rulebook_text)
     cba_sections = parse_answer_sections(cba_text)
@@ -1764,6 +1892,26 @@ def query_app_mode(question: str, mode: str, runtime_config: dict, retrieval_set
             )
             if retry_is_better:
                 response, citations = retry_response, retry_citations
+
+        if needs_reformulation(response, citations):
+            manual_response, manual_citations = manual_retrieve_and_answer(
+                question,
+                runtime_config["kb_id"],
+                runtime_config["model_arn"],
+                mode,
+                runtime_config["region"],
+                retrieval_settings,
+            )
+            manual_is_better = (
+                bool(manual_response)
+                and (
+                    not citations
+                    or len(manual_citations) > len(citations)
+                    or not needs_reformulation(manual_response, manual_citations)
+                )
+            )
+            if manual_is_better:
+                response, citations = manual_response, manual_citations
 
         st.session_state.session_ids[mode] = new_session
         for citation in citations:
