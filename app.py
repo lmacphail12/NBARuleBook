@@ -1168,7 +1168,280 @@ footer {{ display: none !important; }}
 </style>
 """
 
+
+def build_visual_overrides(theme: dict, dark: bool) -> str:
+    p = theme["primary_color"]
+    s = theme["secondary_color"]
+    if dark:
+        paper = "#0C1422"
+        panel = "#121C2D"
+        panel_alt = "#18263A"
+        text = "#E8EEF7"
+        muted = "#96A6BE"
+        grid = "rgba(255,255,255,0.08)"
+        border = "rgba(190,204,227,0.18)"
+    else:
+        paper = "#F3F1EC"
+        panel = "#FBFAF6"
+        panel_alt = "#F7F3EC"
+        text = "#1F2933"
+        muted = "#5E6978"
+        grid = "rgba(31,41,51,0.11)"
+        border = "rgba(31,41,51,0.16)"
+
+    return f"""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Libre+Baskerville:wght@400;700&family=IBM+Plex+Mono:wght@400;500;600&family=Source+Sans+3:wght@400;500;600;700&display=swap');
+
+:root {{
+    --paper: {paper};
+    --panel: {panel};
+    --panel-alt: {panel_alt};
+    --ink: {text};
+    --muted: {muted};
+    --grid: {grid};
+    --accent: {p};
+    --accent-alt: {s};
+    --line: {border};
+}}
+
+.stApp {{
+    background:
+        radial-gradient(1200px 500px at 18% -5%, {p}20 0%, transparent 45%),
+        radial-gradient(900px 420px at 100% 10%, {s}1C 0%, transparent 52%),
+        repeating-linear-gradient(0deg, transparent 0 31px, var(--grid) 31px 32px),
+        repeating-linear-gradient(90deg, transparent 0 31px, var(--grid) 31px 32px),
+        var(--paper) !important;
+}}
+.main {{
+    background: transparent !important;
+}}
+
+html, body, .stApp, .stMarkdown, .stButton button, .stTextInput, .stSelectbox, .stChatInput {{
+    font-family: "Source Sans 3", "Segoe UI", sans-serif !important;
+}}
+h1, h2, h3, .hero-title, .section-label {{
+    font-family: "Libre Baskerville", Georgia, serif !important;
+}}
+code, pre, .stCodeBlock, .stJson {{
+    font-family: "IBM Plex Mono", ui-monospace, monospace !important;
+}}
+
+p, span, li, label, .stMarkdown p, .stMarkdown li {{
+    color: var(--ink) !important;
+    -webkit-text-fill-color: var(--ink) !important;
+}}
+
+.hero-shell {{
+    position: relative;
+    overflow: hidden;
+    border: 1px solid var(--line);
+    border-radius: 22px;
+    background:
+        linear-gradient(145deg, var(--panel) 0%, var(--panel-alt) 100%);
+    box-shadow: 0 22px 40px rgba(0,0,0,0.10);
+}}
+.hero-shell::after {{
+    content: "";
+    position: absolute;
+    inset: 0;
+    background:
+        linear-gradient(90deg, transparent 0, transparent 12%, var(--grid) 12.2%, transparent 12.4%),
+        linear-gradient(0deg, transparent 0, transparent 76%, var(--grid) 76.2%, transparent 76.4%);
+    pointer-events: none;
+}}
+.hero-kicker {{
+    border: 1px solid {p}55;
+    background: {p}18;
+    backdrop-filter: blur(6px);
+}}
+.hero-title {{
+    letter-spacing: -0.02em;
+}}
+.hero-sub {{
+    color: var(--muted) !important;
+    font-size: 1.02rem;
+}}
+
+.answer-card, .source-rail, .helper-card, .bookmark-card, .metric-card {{
+    border: 1px solid var(--line) !important;
+    background: linear-gradient(160deg, var(--panel) 0%, var(--panel-alt) 100%) !important;
+    box-shadow: 0 16px 30px rgba(0,0,0,0.08);
+}}
+.answer-section {{
+    border-left: 4px solid var(--accent);
+    background: linear-gradient(120deg, {p}10 0%, transparent 70%);
+}}
+.section-label {{
+    color: var(--accent) !important;
+    letter-spacing: 0.7px;
+}}
+.source-excerpt, .quote-card {{
+    border: 1px solid var(--line);
+}}
+.relevance-note, .msg-ts, .split-subhead, .bookmark-meta {{
+    color: var(--muted) !important;
+    -webkit-text-fill-color: var(--muted) !important;
+}}
+
+div[data-testid="stButton"] button {{
+    border-radius: 999px !important;
+    border: 1px solid var(--line) !important;
+    background: linear-gradient(180deg, var(--panel) 0%, var(--panel-alt) 100%) !important;
+    color: var(--ink) !important;
+    transition: transform 0.14s ease, box-shadow 0.14s ease, border-color 0.14s ease;
+}}
+div[data-testid="stButton"] button:hover {{
+    border-color: {p}66 !important;
+    transform: translateY(-1px);
+    box-shadow: 0 10px 22px rgba(0,0,0,0.15);
+}}
+div[data-testid="stButton"] button:focus {{
+    outline: none !important;
+    box-shadow: 0 0 0 3px {p}33 !important;
+}}
+
+.chip-intro {{
+    letter-spacing: 0.3px;
+    color: var(--muted) !important;
+}}
+[data-testid="stSidebar"] {{
+    border-right: 1px solid var(--line);
+}}
+
+.sidebar-metrics {{
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.5rem;
+    margin-bottom: 0.45rem;
+}}
+.sidebar-metric {{
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 0.55rem 0.65rem;
+    background: linear-gradient(155deg, var(--panel) 0%, var(--panel-alt) 100%);
+}}
+.sidebar-metric-label {{
+    display: block;
+    font-size: 0.72rem;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    color: var(--muted) !important;
+}}
+.sidebar-metric-value {{
+    display: block;
+    font-family: "Libre Baskerville", Georgia, serif;
+    font-size: 1.1rem;
+    color: var(--ink) !important;
+    line-height: 1.2;
+}}
+
+.signal-strip {{
+    border: 1px solid var(--line);
+    border-radius: 18px;
+    padding: 1.05rem 1.1rem;
+    margin-bottom: 1rem;
+    background:
+        linear-gradient(145deg, var(--panel) 0%, var(--panel-alt) 100%);
+    box-shadow: 0 14px 28px rgba(0,0,0,0.08);
+}}
+.signal-title {{
+    font-family: "Libre Baskerville", Georgia, serif;
+    font-size: 1.1rem;
+    color: var(--ink) !important;
+    margin-bottom: 0.15rem;
+}}
+.signal-sub {{
+    color: var(--muted) !important;
+    font-size: 0.88rem;
+    margin-bottom: 0.75rem;
+}}
+.signal-grid {{
+    display: grid;
+    grid-template-columns: minmax(170px, 230px) 1fr;
+    gap: 0.9rem;
+    align-items: stretch;
+}}
+.signal-kpis {{
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.45rem;
+}}
+.signal-kpi {{
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 0.45rem 0.55rem;
+    background: {p}10;
+}}
+.signal-kpi-label {{
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--muted) !important;
+}}
+.signal-kpi-value {{
+    font-family: "Libre Baskerville", Georgia, serif;
+    font-size: 1.15rem;
+    line-height: 1.18;
+    color: var(--ink) !important;
+}}
+.signal-chart-wrap {{
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 0.35rem 0.25rem 0.25rem 0.25rem;
+    background: linear-gradient(180deg, transparent 0%, {p}07 100%);
+}}
+.signal-chart {{
+    width: 100%;
+    height: 225px;
+}}
+.signal-axis {{
+    stroke: var(--line);
+    stroke-width: 1;
+}}
+.signal-tick {{
+    stroke: var(--line);
+    stroke-width: 1;
+    stroke-dasharray: 2 2;
+}}
+.signal-row {{
+    stroke: {p}99;
+    stroke-width: 2.2;
+}}
+.signal-dot {{
+    fill: {p};
+    stroke: #fff;
+    stroke-width: 1.2;
+}}
+.signal-label {{
+    fill: var(--muted);
+    font-size: 12px;
+    font-family: "Source Sans 3", sans-serif;
+}}
+.signal-value {{
+    fill: var(--ink);
+    font-size: 12px;
+    font-family: "IBM Plex Mono", monospace;
+}}
+.signal-spark {{
+    fill: none;
+    stroke: {s};
+    stroke-width: 2;
+}}
+.signal-spark-dot {{
+    fill: {s};
+}}
+
+@media (max-width: 950px) {{
+    .signal-grid {{
+        grid-template-columns: 1fr;
+    }}
+}}
+</style>
+"""
+
 st.markdown(build_css(THEMES[st.session_state.mode], st.session_state.dark_mode), unsafe_allow_html=True)
+st.markdown(build_visual_overrides(THEMES[st.session_state.mode], st.session_state.dark_mode), unsafe_allow_html=True)
 
 # Auto-scroll JS (mobile)
 st.markdown("""
@@ -2316,6 +2589,152 @@ def render_mobile_nav(current_mode: str):
     st.markdown(f'<div class="mobile-nav">{"".join(links)}</div>', unsafe_allow_html=True)
 
 
+def render_sidebar_metrics(mode: str, question_count: int, answer_count: int, bookmark_count: int, feedback_count: int):
+    metrics = [
+        ("Questions", question_count),
+        ("Answers", answer_count),
+        ("Bookmarks", bookmark_count),
+        ("Feedback", feedback_count),
+    ]
+    cards = "".join(
+        f"""
+        <div class="sidebar-metric">
+            <span class="sidebar-metric-label">{html.escape(label)}</span>
+            <span class="sidebar-metric-value">{value}</span>
+        </div>
+        """
+        for label, value in metrics
+    )
+    st.markdown(f'<div class="sidebar-metrics">{cards}</div>', unsafe_allow_html=True)
+
+
+def _build_sparkline_path(values: list, x0: float, y0: float, width: float, height: float):
+    if not values:
+        values = [0, 0]
+    if len(values) == 1:
+        values = [values[0], values[0]]
+
+    min_v = min(values)
+    max_v = max(values)
+    span = max(max_v - min_v, 1)
+    step = width / max(len(values) - 1, 1)
+
+    points = []
+    for idx, value in enumerate(values):
+        x = x0 + idx * step
+        y = y0 + height - ((value - min_v) / span) * height
+        points.append((x, y))
+
+    path = "M " + " L ".join(f"{x:.1f} {y:.1f}" for x, y in points)
+    return path, points[-1]
+
+
+def render_signal_strip(mode: str, messages: list):
+    theme = THEMES[mode]
+    p = theme["primary_color"]
+    s = theme["secondary_color"]
+    question_count = sum(1 for msg in messages if msg.get("role") == "user")
+    answer_count = sum(1 for msg in messages if msg.get("role") == "assistant")
+    citation_total = sum(len(msg.get("citations", [])) for msg in messages if msg.get("role") == "assistant")
+    bookmark_count = len(get_bookmarks(mode))
+    feedback_count = len(get_feedback_store(mode))
+    avg_sources = (citation_total / answer_count) if answer_count else 0.0
+
+    kpis = [
+        ("Questions", str(question_count)),
+        ("Answers", str(answer_count)),
+        ("Bookmarks", str(bookmark_count)),
+        ("Avg sources", f"{avg_sources:.1f}"),
+    ]
+    kpi_html = "".join(
+        f"""
+        <div class="signal-kpi">
+            <div class="signal-kpi-label">{html.escape(label)}</div>
+            <div class="signal-kpi-value">{html.escape(value)}</div>
+        </div>
+        """
+        for label, value in kpis
+    )
+
+    rows = [
+        ("Questions", float(question_count), str(question_count)),
+        ("Answers", float(answer_count), str(answer_count)),
+        ("Feedback", float(feedback_count), str(feedback_count)),
+        ("Bookmarks", float(bookmark_count), str(bookmark_count)),
+    ]
+    max_value = max([value for _, value, _ in rows] + [1.0])
+    chart_width = 560
+    chart_height = 210
+    x_left = 140
+    x_right = chart_width - 28
+    usable_width = max(x_right - x_left, 1)
+    y_start = 34
+    y_step = 34
+
+    tick_values = sorted({0.0, round(max_value / 2, 1), round(max_value, 1)})
+    tick_lines = []
+    for tick in tick_values:
+        tick_x = x_left + (tick / max_value) * usable_width
+        tick_label = str(int(tick)) if abs(tick - int(tick)) < 1e-9 else f"{tick:.1f}"
+        tick_lines.append(
+            f'<line class="signal-tick" x1="{tick_x:.1f}" y1="{y_start - 18}" x2="{tick_x:.1f}" y2="{y_start + y_step * (len(rows) - 1) + 16}" />'
+        )
+        tick_lines.append(
+            f'<text class="signal-label" x="{tick_x:.1f}" y="{chart_height - 8}" text-anchor="middle">{tick_label}</text>'
+        )
+
+    row_marks = []
+    for idx, (label, value, display_value) in enumerate(rows):
+        y = y_start + idx * y_step
+        end_x = x_left + (value / max_value) * usable_width
+        row_marks.append(f'<line class="signal-axis" x1="{x_left}" y1="{y}" x2="{x_right}" y2="{y}" />')
+        row_marks.append(f'<line class="signal-row" x1="{x_left}" y1="{y}" x2="{end_x:.1f}" y2="{y}" />')
+        row_marks.append(f'<circle class="signal-dot" cx="{end_x:.1f}" cy="{y}" r="5.2" />')
+        row_marks.append(f'<text class="signal-label" x="{x_left - 12}" y="{y + 4}" text-anchor="end">{html.escape(label)}</text>')
+        row_marks.append(
+            f'<text class="signal-value" x="{min(end_x + 10, x_right - 4):.1f}" y="{y + 4}" text-anchor="start">{html.escape(display_value)}</text>'
+        )
+
+    recent_msgs = messages[-18:]
+    spark_values = []
+    running_questions = 0
+    for msg in recent_msgs:
+        if msg.get("role") == "user":
+            running_questions += 1
+        spark_values.append(running_questions)
+    spark_path, (spark_x, spark_y) = _build_sparkline_path(
+        spark_values,
+        x_left,
+        y_start + y_step * len(rows) + 8,
+        usable_width,
+        20,
+    )
+
+    svg = f"""
+<svg class="signal-chart" viewBox="0 0 {chart_width} {chart_height}" role="img" aria-label="Session metrics chart">
+    {''.join(tick_lines)}
+    {''.join(row_marks)}
+    <path class="signal-spark" d="{spark_path}" />
+    <circle class="signal-spark-dot" cx="{spark_x:.1f}" cy="{spark_y:.1f}" r="4.4" />
+    <text class="signal-label" x="{x_left}" y="{chart_height - 28}">Recent query momentum</text>
+</svg>
+"""
+
+    st.markdown(
+        f"""
+        <div class="signal-strip">
+            <div class="signal-title">{theme["icon"]} Session Signal Board</div>
+            <div class="signal-sub">Data-journal style view of this workspace: axis-first, annotation-friendly, and source-aware.</div>
+            <div class="signal-grid">
+                <div class="signal-kpis">{kpi_html}</div>
+                <div class="signal-chart-wrap">{svg}</div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 # ─────────────────────────────────────────────
 # EXPORT HELPER
 # ─────────────────────────────────────────────
@@ -2399,6 +2818,10 @@ def main():
     model_arn = runtime_config["model_arn"]
     quiz_model_id = runtime_config["quiz_model_id"]
     assistant_history = [msg for msg in current_messages if msg["role"] == "assistant"]
+    question_count = sum(1 for msg in current_messages if msg.get("role") == "user")
+    answer_count = len(assistant_history)
+    bookmark_count = len(get_bookmarks(current_mode))
+    feedback_count = len(get_feedback_store(current_mode))
 
     # ──────────────────────────────────────────
     # SIDEBAR
@@ -2465,15 +2888,14 @@ def main():
 
         # Stats
         st.markdown("### 📊 Stats")
-        q_count = len([m for m in current_messages if m["role"] == "user"])
-        bookmark_count = len(get_bookmarks(current_mode))
-        feedback_count = len(get_feedback_store(current_mode))
-        st.markdown(f"""
-        <div class="metric-card">
-            <h2 style="font-size:2rem;">{theme['icon']} {q_count}</h2>
-            <p>Questions Asked</p>
-        </div>""", unsafe_allow_html=True)
-        st.caption(f"{bookmark_count} bookmarks saved | {feedback_count} feedback signals")
+        render_sidebar_metrics(
+            current_mode,
+            question_count=question_count,
+            answer_count=answer_count,
+            bookmark_count=bookmark_count,
+            feedback_count=feedback_count,
+        )
+        st.caption(f"{theme['icon']} {question_count} queries in this mode")
 
         st.markdown("---")
 
@@ -2548,6 +2970,7 @@ def main():
         """,
         unsafe_allow_html=True,
     )
+    render_signal_strip(current_mode, current_messages)
     render_mobile_nav(current_mode)
 
     st.markdown('<div id="query-starters"></div>', unsafe_allow_html=True)
