@@ -16,7 +16,7 @@ st.set_page_config(
     page_title="NBA Assistant - Rulebook & CBA",
     page_icon="🏀",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="collapsed"
 )
 
 # ─────────────────────────────────────────────
@@ -1306,7 +1306,49 @@ div[data-testid="stButton"] button:focus {{
     color: var(--muted) !important;
 }}
 [data-testid="stSidebar"] {{
-    border-right: 1px solid var(--line);
+    display: none !important;
+}}
+[data-testid="collapsedControl"] {{
+    display: none !important;
+}}
+
+.top-rail {{
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    padding: 0.9rem 1rem;
+    margin-bottom: 1rem;
+    background: linear-gradient(145deg, var(--panel) 0%, var(--panel-alt) 100%);
+    box-shadow: 0 12px 24px rgba(0,0,0,0.07);
+}}
+.top-rail-title {{
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 0.76rem;
+    text-transform: uppercase;
+    letter-spacing: 0.55px;
+    color: var(--muted) !important;
+    margin-bottom: 0.55rem;
+}}
+.top-rail-note {{
+    font-size: 0.86rem;
+    color: var(--muted) !important;
+}}
+.control-drawer {{
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    background: linear-gradient(145deg, var(--panel) 0%, var(--panel-alt) 100%);
+    padding: 0.9rem 1rem;
+}}
+.mode-chip {{
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.28rem 0.7rem;
+    border-radius: 999px;
+    border: 1px solid {p}55;
+    background: {p}15;
+    color: var(--ink) !important;
+    font-size: 0.79rem;
+    font-weight: 700;
 }}
 
 .sidebar-metrics {{
@@ -2647,12 +2689,8 @@ def render_signal_strip(mode: str, messages: list):
         ("Avg sources", f"{avg_sources:.1f}"),
     ]
     kpi_html = "".join(
-        f"""
-        <div class="signal-kpi">
-            <div class="signal-kpi-label">{html.escape(label)}</div>
-            <div class="signal-kpi-value">{html.escape(value)}</div>
-        </div>
-        """
+        f'<div class="signal-kpi"><div class="signal-kpi-label">{html.escape(label)}</div>'
+        f'<div class="signal-kpi-value">{html.escape(value)}</div></div>'
         for label, value in kpis
     )
 
@@ -2710,29 +2748,26 @@ def render_signal_strip(mode: str, messages: list):
         20,
     )
 
-    svg = f"""
-<svg class="signal-chart" viewBox="0 0 {chart_width} {chart_height}" role="img" aria-label="Session metrics chart">
-    {''.join(tick_lines)}
-    {''.join(row_marks)}
-    <path class="signal-spark" d="{spark_path}" />
-    <circle class="signal-spark-dot" cx="{spark_x:.1f}" cy="{spark_y:.1f}" r="4.4" />
-    <text class="signal-label" x="{x_left}" y="{chart_height - 28}">Recent query momentum</text>
-</svg>
-"""
-
-    st.markdown(
-        f"""
-        <div class="signal-strip">
-            <div class="signal-title">{theme["icon"]} Session Signal Board</div>
-            <div class="signal-sub">Data-journal style view of this workspace: axis-first, annotation-friendly, and source-aware.</div>
-            <div class="signal-grid">
-                <div class="signal-kpis">{kpi_html}</div>
-                <div class="signal-chart-wrap">{svg}</div>
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
+    svg = (
+        f'<svg class="signal-chart" viewBox="0 0 {chart_width} {chart_height}" role="img" aria-label="Session metrics chart">'
+        f'{"".join(tick_lines)}'
+        f'{"".join(row_marks)}'
+        f'<path class="signal-spark" d="{spark_path}" />'
+        f'<circle class="signal-spark-dot" cx="{spark_x:.1f}" cy="{spark_y:.1f}" r="4.4" />'
+        f'<text class="signal-label" x="{x_left}" y="{chart_height - 28}">Recent query momentum</text>'
+        "</svg>"
     )
+
+    panel_html = (
+        '<div class="signal-strip">'
+        f'<div class="signal-title">{theme["icon"]} Session Signal Board</div>'
+        '<div class="signal-sub">Session analytics with a clean data-visual surface.</div>'
+        '<div class="signal-grid">'
+        f'<div class="signal-kpis">{kpi_html}</div>'
+        f'<div class="signal-chart-wrap">{svg}</div>'
+        "</div></div>"
+    )
+    st.markdown(panel_html, unsafe_allow_html=True)
 
 
 # ─────────────────────────────────────────────
@@ -2824,135 +2859,112 @@ def main():
     feedback_count = len(get_feedback_store(current_mode))
 
     # ──────────────────────────────────────────
-    # SIDEBAR
+    # TOP CONTROL RAIL
     # ──────────────────────────────────────────
-    with st.sidebar:
-        # Dark / Light toggle
-        dark_label = "☀️ Light Mode" if st.session_state.dark_mode else "🌙 Dark Mode"
-        if st.button(dark_label, use_container_width=True):
+    st.markdown(
+        '<div class="top-rail"><div class="top-rail-title">Control Rail</div>'
+        '<div class="top-rail-note">Switch instantly between Rulebook and CBA while keeping each chat history separate.</div></div>',
+        unsafe_allow_html=True,
+    )
+    rail_cols = st.columns([1, 1, 1.2], gap="small")
+    with rail_cols[0]:
+        if st.button(
+            "Rulebook",
+            key="mode_switch_rulebook",
+            use_container_width=True,
+            type="primary" if current_mode == "rulebook" else "secondary",
+        ):
+            if current_mode != "rulebook":
+                st.session_state.mode = "rulebook"
+                st.rerun()
+    with rail_cols[1]:
+        if st.button(
+            "CBA",
+            key="mode_switch_cba",
+            use_container_width=True,
+            type="primary" if current_mode == "cba" else "secondary",
+        ):
+            if current_mode != "cba":
+                st.session_state.mode = "cba"
+                st.rerun()
+    with rail_cols[2]:
+        dark_label = "Switch to Light" if st.session_state.dark_mode else "Switch to Dark"
+        if st.button(dark_label, key="theme_toggle_main", use_container_width=True):
             st.session_state.dark_mode = not st.session_state.dark_mode
             st.rerun()
+    st.markdown(f'<span class="mode-chip">Active: {theme["name"]}</span>', unsafe_allow_html=True)
 
-        st.markdown("---")
-
-        # Mode toggle (sticky in sidebar)
-        st.markdown("### 🔄 Mode")
-        mode_options = list(MODE_KEYS)
-        selected_mode = st.radio(
-            "",
-            options=mode_options,
-            format_func=lambda x: THEMES[x]["name"],
-            index=mode_options.index(current_mode) if current_mode in mode_options else 0,
-            label_visibility="collapsed",
-        )
-        if selected_mode != current_mode:
-            st.session_state.mode = selected_mode
-            st.rerun()
-
-        st.markdown("---")
-        st.markdown("### 🔎 Retrieval")
-        retrieval_settings["strict_grounding"] = st.toggle(
-            "Strict grounding",
-            value=retrieval_settings["strict_grounding"],
-            key=f"strict_grounding_{current_mode}",
-            help="Prefer no-answer states over speculative synthesis.",
-        )
-        retrieval_settings["exact_match_bias"] = st.toggle(
-            "Exact clause bias",
-            value=retrieval_settings["exact_match_bias"],
-            key=f"exact_bias_{current_mode}",
-            help="Prefer exact definitions and clause wording that reuse your terms.",
-        )
-        retrieval_settings["number_of_results"] = st.slider(
-            "Results to retrieve",
-            min_value=3,
-            max_value=12,
-            value=retrieval_settings["number_of_results"],
-            key=f"results_{current_mode}",
-        )
-        retrieval_settings["max_sources"] = st.slider(
-            "Sources to show",
-            min_value=1,
-            max_value=6,
-            value=retrieval_settings["max_sources"],
-            key=f"sources_{current_mode}",
-        )
-        if current_mode in ("cba", "both"):
-            retrieval_settings["include_operations_manual"] = st.toggle(
-                "Include Operations Manual",
-                value=retrieval_settings["include_operations_manual"],
-                key=f"ops_manual_{current_mode}",
+    with st.expander("Controls, Retrieval, and Session Tools", expanded=False):
+        settings_col1, settings_col2 = st.columns(2, gap="large")
+        with settings_col1:
+            st.markdown("#### Retrieval")
+            retrieval_settings["strict_grounding"] = st.toggle(
+                "Strict grounding",
+                value=retrieval_settings["strict_grounding"],
+                key=f"strict_grounding_{current_mode}",
+                help="Prefer no-answer states over speculative synthesis.",
             )
-
-        st.markdown("---")
-
-        # Stats
-        st.markdown("### 📊 Stats")
-        render_sidebar_metrics(
-            current_mode,
-            question_count=question_count,
-            answer_count=answer_count,
-            bookmark_count=bookmark_count,
-            feedback_count=feedback_count,
-        )
-        st.caption(f"{theme['icon']} {question_count} queries in this mode")
-
-        st.markdown("---")
-
-        st.markdown("### 💡 Tips")
-        if current_mode == "rulebook":
-            st.markdown("""
-- Ask about specific rules by number
-- Use the Scenario Builder for play rulings
-- Tap `Exact clause` after a response for quote-first answers
-- Use the Workbench to compare two rules quickly
-""")
-        elif current_mode == "both":
-            st.markdown("""
-- Use this mode for on-court vs off-court consequences
-- Compare gameplay rules with roster, salary, or discipline impacts
-- Check the source rail to see which lane each source came from
-- Use the Workbench to compare both source families side by side
-""")
-        else:
-            st.markdown("""
-- Ask about CBA articles, waivers, or salary-cap math
-- Toggle Operations Manual coverage when you want only the CBA
-- Use `Analyst memo` for front-office style answers
-- Browse clauses by article or topic from the Workbench
-""")
-
-        st.markdown("---")
-
-        st.markdown("### ⚡ Actions")
-        c1, c2 = st.columns(2)
-        with c1:
-            if st.button("🗑️ Clear", use_container_width=True):
-                clear_mode_state(current_mode)
-                st.rerun()
-        with c2:
-            if st.button("🔄 Refresh", use_container_width=True):
-                st.rerun()
-
-        st.markdown("---")
-        st.markdown("### 📦 Export")
-        st.session_state.export_format = st.selectbox(
-            "Export style",
-            EXPORT_FORMATS,
-            index=EXPORT_FORMATS.index(st.session_state.export_format),
-            key="export_style",
-        )
-        if current_messages:
-            md_export = export_chat(current_messages, current_mode, st.session_state.export_format)
-            ts_str = datetime.now().strftime("%Y%m%d_%H%M")
-            st.download_button(
-                label="📥 Export Session",
-                data=md_export,
-                file_name=f"nba_{current_mode}_{ts_str}.md",
-                mime="text/markdown",
-                use_container_width=True,
+            retrieval_settings["exact_match_bias"] = st.toggle(
+                "Exact clause bias",
+                value=retrieval_settings["exact_match_bias"],
+                key=f"exact_bias_{current_mode}",
+                help="Prefer exact definitions and clause wording that reuse your terms.",
             )
+            retrieval_settings["number_of_results"] = st.slider(
+                "Results to retrieve",
+                min_value=3,
+                max_value=12,
+                value=retrieval_settings["number_of_results"],
+                key=f"results_{current_mode}",
+            )
+            retrieval_settings["max_sources"] = st.slider(
+                "Sources to show",
+                min_value=1,
+                max_value=6,
+                value=retrieval_settings["max_sources"],
+                key=f"sources_{current_mode}",
+            )
+            if current_mode in ("cba", "both"):
+                retrieval_settings["include_operations_manual"] = st.toggle(
+                    "Include Operations Manual",
+                    value=retrieval_settings["include_operations_manual"],
+                    key=f"ops_manual_{current_mode}",
+                )
 
+        with settings_col2:
+            st.markdown("#### Session")
+            render_sidebar_metrics(
+                current_mode,
+                question_count=question_count,
+                answer_count=answer_count,
+                bookmark_count=bookmark_count,
+                feedback_count=feedback_count,
+            )
+            action_cols = st.columns(2)
+            with action_cols[0]:
+                if st.button("Clear mode history", key=f"clear_mode_{current_mode}", use_container_width=True):
+                    clear_mode_state(current_mode)
+                    st.rerun()
+            with action_cols[1]:
+                if st.button("Refresh view", key=f"refresh_mode_{current_mode}", use_container_width=True):
+                    st.rerun()
+
+            st.session_state.export_format = st.selectbox(
+                "Export style",
+                EXPORT_FORMATS,
+                index=EXPORT_FORMATS.index(st.session_state.export_format),
+                key="export_style",
+            )
+            if current_messages:
+                md_export = export_chat(current_messages, current_mode, st.session_state.export_format)
+                ts_str = datetime.now().strftime("%Y%m%d_%H%M")
+                st.download_button(
+                    label="Download session",
+                    data=md_export,
+                    file_name=f"nba_{current_mode}_{ts_str}.md",
+                    mime="text/markdown",
+                    use_container_width=True,
+                )
         st.markdown("---")
         render_sidebar_bookmarks(current_mode)
 
