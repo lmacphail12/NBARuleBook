@@ -1207,10 +1207,10 @@ def build_visual_overrides(theme: dict, dark: bool) -> str:
 
 .stApp {{
     background:
-        radial-gradient(1200px 500px at 18% -5%, {p}20 0%, transparent 45%),
-        radial-gradient(900px 420px at 100% 10%, {s}1C 0%, transparent 52%),
-        repeating-linear-gradient(0deg, transparent 0 31px, var(--grid) 31px 32px),
-        repeating-linear-gradient(90deg, transparent 0 31px, var(--grid) 31px 32px),
+        radial-gradient(1400px 680px at -15% -18%, {p}26 0%, transparent 52%),
+        radial-gradient(1100px 560px at 102% -10%, {s}22 0%, transparent 56%),
+        radial-gradient(860px 460px at 18% 100%, {p}14 0%, transparent 56%),
+        linear-gradient(180deg, {paper} 0%, {panel_alt} 100%),
         var(--paper) !important;
 }}
 .main {{
@@ -1245,9 +1245,7 @@ p, span, li, label, .stMarkdown p, .stMarkdown li {{
     content: "";
     position: absolute;
     inset: 0;
-    background:
-        linear-gradient(90deg, transparent 0, transparent 12%, var(--grid) 12.2%, transparent 12.4%),
-        linear-gradient(0deg, transparent 0, transparent 76%, var(--grid) 76.2%, transparent 76.4%);
+    background: linear-gradient(125deg, transparent 0%, transparent 64%, {p}10 100%);
     pointer-events: none;
 }}
 .hero-kicker {{
@@ -1299,6 +1297,33 @@ div[data-testid="stButton"] button:hover {{
 div[data-testid="stButton"] button:focus {{
     outline: none !important;
     box-shadow: 0 0 0 3px {p}33 !important;
+}}
+
+div[data-testid="stChatInput"] {{
+    background: var(--paper) !important;
+    border: 1px solid var(--line) !important;
+    border-radius: 18px !important;
+    box-shadow: none !important;
+}}
+div[data-testid="stChatInput"] > div {{
+    background: var(--paper) !important;
+    border-radius: 18px !important;
+}}
+.stChatInputContainer {{
+    background: transparent !important;
+    border: none !important;
+}}
+div[data-testid="stChatInput"] textarea,
+.stChatInputContainer textarea,
+[data-baseweb="textarea"] textarea {{
+    background: var(--paper) !important;
+    color: var(--ink) !important;
+    -webkit-text-fill-color: var(--ink) !important;
+}}
+div[data-testid="stChatInput"] textarea::placeholder,
+.stChatInputContainer textarea::placeholder {{
+    color: var(--muted) !important;
+    -webkit-text-fill-color: var(--muted) !important;
 }}
 
 .chip-intro {{
@@ -2623,7 +2648,7 @@ def render_sidebar_bookmarks(mode: str):
 
 
 def render_mobile_nav(current_mode: str):
-    links = ['<a href="#assistant-workbench">Workbench</a>', '<a href="#query-starters">Starters</a>']
+    links = ['<a href="#query-starters">Starters</a>']
     if current_mode != "both":
         links.append('<a href="#quiz-panel">Quiz</a>')
     if current_mode == "rulebook":
@@ -2648,126 +2673,6 @@ def render_sidebar_metrics(mode: str, question_count: int, answer_count: int, bo
         for label, value in metrics
     )
     st.markdown(f'<div class="sidebar-metrics">{cards}</div>', unsafe_allow_html=True)
-
-
-def _build_sparkline_path(values: list, x0: float, y0: float, width: float, height: float):
-    if not values:
-        values = [0, 0]
-    if len(values) == 1:
-        values = [values[0], values[0]]
-
-    min_v = min(values)
-    max_v = max(values)
-    span = max(max_v - min_v, 1)
-    step = width / max(len(values) - 1, 1)
-
-    points = []
-    for idx, value in enumerate(values):
-        x = x0 + idx * step
-        y = y0 + height - ((value - min_v) / span) * height
-        points.append((x, y))
-
-    path = "M " + " L ".join(f"{x:.1f} {y:.1f}" for x, y in points)
-    return path, points[-1]
-
-
-def render_signal_strip(mode: str, messages: list):
-    theme = THEMES[mode]
-    p = theme["primary_color"]
-    s = theme["secondary_color"]
-    question_count = sum(1 for msg in messages if msg.get("role") == "user")
-    answer_count = sum(1 for msg in messages if msg.get("role") == "assistant")
-    citation_total = sum(len(msg.get("citations", [])) for msg in messages if msg.get("role") == "assistant")
-    bookmark_count = len(get_bookmarks(mode))
-    feedback_count = len(get_feedback_store(mode))
-    avg_sources = (citation_total / answer_count) if answer_count else 0.0
-
-    kpis = [
-        ("Questions", str(question_count)),
-        ("Answers", str(answer_count)),
-        ("Bookmarks", str(bookmark_count)),
-        ("Avg sources", f"{avg_sources:.1f}"),
-    ]
-    kpi_html = "".join(
-        f'<div class="signal-kpi"><div class="signal-kpi-label">{html.escape(label)}</div>'
-        f'<div class="signal-kpi-value">{html.escape(value)}</div></div>'
-        for label, value in kpis
-    )
-
-    rows = [
-        ("Questions", float(question_count), str(question_count)),
-        ("Answers", float(answer_count), str(answer_count)),
-        ("Feedback", float(feedback_count), str(feedback_count)),
-        ("Bookmarks", float(bookmark_count), str(bookmark_count)),
-    ]
-    max_value = max([value for _, value, _ in rows] + [1.0])
-    chart_width = 560
-    chart_height = 210
-    x_left = 140
-    x_right = chart_width - 28
-    usable_width = max(x_right - x_left, 1)
-    y_start = 34
-    y_step = 34
-
-    tick_values = sorted({0.0, round(max_value / 2, 1), round(max_value, 1)})
-    tick_lines = []
-    for tick in tick_values:
-        tick_x = x_left + (tick / max_value) * usable_width
-        tick_label = str(int(tick)) if abs(tick - int(tick)) < 1e-9 else f"{tick:.1f}"
-        tick_lines.append(
-            f'<line class="signal-tick" x1="{tick_x:.1f}" y1="{y_start - 18}" x2="{tick_x:.1f}" y2="{y_start + y_step * (len(rows) - 1) + 16}" />'
-        )
-        tick_lines.append(
-            f'<text class="signal-label" x="{tick_x:.1f}" y="{chart_height - 8}" text-anchor="middle">{tick_label}</text>'
-        )
-
-    row_marks = []
-    for idx, (label, value, display_value) in enumerate(rows):
-        y = y_start + idx * y_step
-        end_x = x_left + (value / max_value) * usable_width
-        row_marks.append(f'<line class="signal-axis" x1="{x_left}" y1="{y}" x2="{x_right}" y2="{y}" />')
-        row_marks.append(f'<line class="signal-row" x1="{x_left}" y1="{y}" x2="{end_x:.1f}" y2="{y}" />')
-        row_marks.append(f'<circle class="signal-dot" cx="{end_x:.1f}" cy="{y}" r="5.2" />')
-        row_marks.append(f'<text class="signal-label" x="{x_left - 12}" y="{y + 4}" text-anchor="end">{html.escape(label)}</text>')
-        row_marks.append(
-            f'<text class="signal-value" x="{min(end_x + 10, x_right - 4):.1f}" y="{y + 4}" text-anchor="start">{html.escape(display_value)}</text>'
-        )
-
-    recent_msgs = messages[-18:]
-    spark_values = []
-    running_questions = 0
-    for msg in recent_msgs:
-        if msg.get("role") == "user":
-            running_questions += 1
-        spark_values.append(running_questions)
-    spark_path, (spark_x, spark_y) = _build_sparkline_path(
-        spark_values,
-        x_left,
-        y_start + y_step * len(rows) + 8,
-        usable_width,
-        20,
-    )
-
-    svg = (
-        f'<svg class="signal-chart" viewBox="0 0 {chart_width} {chart_height}" role="img" aria-label="Session metrics chart">'
-        f'{"".join(tick_lines)}'
-        f'{"".join(row_marks)}'
-        f'<path class="signal-spark" d="{spark_path}" />'
-        f'<circle class="signal-spark-dot" cx="{spark_x:.1f}" cy="{spark_y:.1f}" r="4.4" />'
-        f'<text class="signal-label" x="{x_left}" y="{chart_height - 28}">Recent query momentum</text>'
-        "</svg>"
-    )
-
-    panel_html = (
-        '<div class="signal-strip">'
-        f'<div class="signal-title">{theme["icon"]} Session Signal Board</div>'
-        '<div class="signal-sub">Session analytics with a clean data-visual surface.</div>'
-        '<div class="signal-grid">'
-        f'<div class="signal-kpis">{kpi_html}</div>'
-        f'<div class="signal-chart-wrap">{svg}</div>'
-        "</div></div>"
-    )
-    st.markdown(panel_html, unsafe_allow_html=True)
 
 
 # ─────────────────────────────────────────────
@@ -2859,15 +2764,10 @@ def main():
     feedback_count = len(get_feedback_store(current_mode))
 
     # ──────────────────────────────────────────
-    # TOP CONTROL RAIL
+    # MODE SWITCH
     # ──────────────────────────────────────────
-    st.markdown(
-        '<div class="top-rail"><div class="top-rail-title">Control Rail</div>'
-        '<div class="top-rail-note">Switch instantly between Rulebook and CBA while keeping each chat history separate.</div></div>',
-        unsafe_allow_html=True,
-    )
-    rail_cols = st.columns([1, 1, 1.2], gap="small")
-    with rail_cols[0]:
+    mode_cols = st.columns([1, 1, 0.22], gap="small")
+    with mode_cols[0]:
         if st.button(
             "Rulebook",
             key="mode_switch_rulebook",
@@ -2877,7 +2777,7 @@ def main():
             if current_mode != "rulebook":
                 st.session_state.mode = "rulebook"
                 st.rerun()
-    with rail_cols[1]:
+    with mode_cols[1]:
         if st.button(
             "CBA",
             key="mode_switch_cba",
@@ -2887,12 +2787,11 @@ def main():
             if current_mode != "cba":
                 st.session_state.mode = "cba"
                 st.rerun()
-    with rail_cols[2]:
-        dark_label = "Switch to Light" if st.session_state.dark_mode else "Switch to Dark"
-        if st.button(dark_label, key="theme_toggle_main", use_container_width=True):
+    with mode_cols[2]:
+        theme_icon = "☀︎" if st.session_state.dark_mode else "☾"
+        if st.button(theme_icon, key="theme_toggle_main", use_container_width=True, help="Toggle theme"):
             st.session_state.dark_mode = not st.session_state.dark_mode
             st.rerun()
-    st.markdown(f'<span class="mode-chip">Active: {theme["name"]}</span>', unsafe_allow_html=True)
 
     with st.expander("Controls, Retrieval, and Session Tools", expanded=False):
         settings_col1, settings_col2 = st.columns(2, gap="large")
@@ -2971,7 +2870,6 @@ def main():
     # ──────────────────────────────────────────
     # HEADER
     # ──────────────────────────────────────────
-    st.markdown('<div id="assistant-workbench"></div>', unsafe_allow_html=True)
     st.markdown(
         f"""
         <div class="hero-shell">
@@ -2982,7 +2880,6 @@ def main():
         """,
         unsafe_allow_html=True,
     )
-    render_signal_strip(current_mode, current_messages)
     render_mobile_nav(current_mode)
 
     st.markdown('<div id="query-starters"></div>', unsafe_allow_html=True)
@@ -2995,66 +2892,6 @@ def main():
                 queue_prompt(current_mode, starter_prompt_for(current_mode, ex))
                 st.rerun()
     st.markdown("---")
-
-    with st.expander("🧰 Assistant Workbench", expanded=False):
-        compare_col, browse_col = st.columns(2, gap="large")
-        with compare_col:
-            st.markdown("#### Compare")
-            compare_tool = st.selectbox(
-                "Comparison tool",
-                ["Compare two rules/articles", "Rulebook vs CBA impact", "Answer vs exact source text"],
-                key=f"compare_tool_{current_mode}",
-            )
-            if compare_tool == "Compare two rules/articles":
-                left_term = st.text_input("First rule/article/topic", key=f"cmp_left_{current_mode}")
-                right_term = st.text_input("Second rule/article/topic", key=f"cmp_right_{current_mode}")
-                if st.button("Run comparison", key=f"cmp_run_{current_mode}", use_container_width=True) and left_term.strip() and right_term.strip():
-                    queue_prompt(current_mode, build_compare_prompt(left_term.strip(), right_term.strip(), current_mode))
-                    st.rerun()
-            elif compare_tool == "Rulebook vs CBA impact":
-                topic = st.text_input("Crossbook topic", key=f"cross_topic_{current_mode}")
-                if st.button("Compare crossbook impact", key=f"cross_compare_{current_mode}", use_container_width=True) and topic.strip():
-                    st.session_state.mode = "both"
-                    queue_prompt("both", build_crossbook_prompt(topic.strip()))
-                    st.rerun()
-            else:
-                if assistant_history:
-                    recent_map = {
-                        get_message_id(msg): (msg.get("question") or msg["content"][:60])
-                        for msg in assistant_history[-8:]
-                    }
-                    selected_message = st.selectbox(
-                        "Recent answer",
-                        options=list(recent_map.keys()),
-                        format_func=lambda key: recent_map[key],
-                        key=f"answer_compare_{current_mode}",
-                    )
-                    if st.button("Quote-check this answer", key=f"quote_check_{current_mode}", use_container_width=True):
-                        chosen = next(msg for msg in assistant_history[-8:] if get_message_id(msg) == selected_message)
-                        queue_prompt(
-                            current_mode,
-                            f"For the earlier question '{chosen.get('question', 'this topic')}', show the exact source text and explain whether your prior answer stayed within that language.",
-                        )
-                        st.rerun()
-                else:
-                    st.caption("Ask at least one question to compare an answer against source text.")
-
-        with browse_col:
-            st.markdown("#### Document Explorer")
-            browse_type = st.selectbox(
-                "Browse by",
-                ["Rule", "Section", "Article", "Part", "Topic"],
-                key=f"browse_type_{current_mode}",
-            )
-            preset = st.selectbox(
-                "Suggested destination",
-                DOC_BROWSE_PRESETS[current_mode],
-                key=f"browse_preset_{current_mode}",
-            )
-            browse_value = st.text_input("Or enter your own target", value=preset, key=f"browse_value_{current_mode}")
-            if st.button("Explore source", key=f"browse_run_{current_mode}", use_container_width=True) and browse_value.strip():
-                queue_prompt(current_mode, build_doc_browse_prompt(browse_type, browse_value.strip(), current_mode))
-                st.rerun()
 
     # ──────────────────────────────────────────
     # QUIZ ME
