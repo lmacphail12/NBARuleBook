@@ -307,6 +307,18 @@ def init_session_state():
         for mode in MODE_KEYS:
             st.session_state.pending_prompts.setdefault(mode, None)
 
+    if "pending_prompt_meta" not in st.session_state:
+        st.session_state.pending_prompt_meta = {mode: None for mode in MODE_KEYS}
+    elif not isinstance(st.session_state.pending_prompt_meta, dict):
+        legacy_meta = st.session_state.pending_prompt_meta
+        st.session_state.pending_prompt_meta = {
+            mode: legacy_meta if mode == current_mode else None
+            for mode in MODE_KEYS
+        }
+    else:
+        for mode in MODE_KEYS:
+            st.session_state.pending_prompt_meta.setdefault(mode, None)
+
     if "quiz_state" not in st.session_state:
         st.session_state.quiz_state = {mode: _empty_quiz_state() for mode in MODE_KEYS}
         if any(k in st.session_state for k in ("current_quiz", "quiz_raw", "show_quiz_answer")):
@@ -395,6 +407,7 @@ def clear_mode_state(mode: str):
     st.session_state.messages_by_mode[mode] = []
     st.session_state.session_ids[mode] = None
     st.session_state.pending_prompts[mode] = None
+    st.session_state.pending_prompt_meta[mode] = None
     st.session_state.queued_action[mode] = None
     st.session_state.quiz_asked[mode] = {}
     st.session_state.bookmarks_by_mode[mode] = []
@@ -413,8 +426,12 @@ def get_message_id(msg: dict) -> str:
     return msg.get("id") or f"legacy-{msg.get('timestamp', 'no-ts')}-{abs(hash(msg.get('content', '')))}"
 
 
-def queue_prompt(mode: str, prompt: str, action_key: str = None):
+def queue_prompt(mode: str, prompt: str, action_key: str = None, origin: str = "generic", label: str = None):
     st.session_state.pending_prompts[mode] = prompt
+    st.session_state.pending_prompt_meta[mode] = {
+        "origin": origin,
+        "label": label or prompt[:88],
+    }
     st.session_state.queued_action[mode] = action_key
 
 
@@ -1745,6 +1762,35 @@ footer {{
     font-family: "Space Grotesk", sans-serif !important;
 }}
 
+.pending-query-banner {{
+    display: flex;
+    align-items: center;
+    gap: 0.7rem;
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 0.62rem 0.85rem;
+    margin: 0.55rem 0 0.85rem 0;
+    background: linear-gradient(135deg, {p}1D 0%, {s}1B 100%);
+    box-shadow: 0 10px 20px var(--shadow);
+}}
+.pending-query-dot {{
+    width: 10px;
+    height: 10px;
+    border-radius: 999px;
+    background: {p};
+    box-shadow: 0 0 0 0 {p}55;
+    animation: pending-pulse 1.1s ease-out infinite;
+}}
+.pending-query-text {{
+    font-size: 0.92rem;
+    color: var(--ink) !important;
+    font-weight: 600;
+}}
+.pending-query-text strong {{
+    font-family: "Space Grotesk", sans-serif;
+    letter-spacing: 0.02em;
+}}
+
 @keyframes hero-rise {{
     from {{ transform: translateY(8px); opacity: 0.62; }}
     to {{ transform: translateY(0); opacity: 1; }}
@@ -1752,6 +1798,10 @@ footer {{
 @keyframes aurora-drift {{
     0% {{ filter: saturate(1) hue-rotate(0deg); }}
     100% {{ filter: saturate(1.08) hue-rotate(-6deg); }}
+}}
+@keyframes pending-pulse {{
+    0% {{ box-shadow: 0 0 0 0 {p}55; opacity: 1; }}
+    100% {{ box-shadow: 0 0 0 10px transparent; opacity: 0.85; }}
 }}
 </style>
 """
@@ -2868,7 +2918,7 @@ def render_quick_chips(mode: str):
         with chip_cols[idx % 3]:
             if st.button(chip, key=f"chip_{mode}_{idx}", use_container_width=True):
                 prompt = starter_prompt_for(mode, chip)
-                queue_prompt(mode, prompt)
+                queue_prompt(mode, prompt, origin="quick_chip", label=chip)
                 st.rerun()
 
 
@@ -3038,6 +3088,18 @@ def main():
             st.session_state.dark_mode = not st.session_state.dark_mode
             st.rerun()
 
+    pending_prompt = st.session_state.pending_prompts.get(current_mode)
+    pending_meta = st.session_state.pending_prompt_meta.get(current_mode) or {}
+    if pending_prompt and pending_meta.get("origin") in {"quick_chip", "starter"}:
+        label = html.escape(pending_meta.get("label", "Quick query"))
+        st.markdown(
+            '<div class="pending-query-banner">'
+            '<span class="pending-query-dot"></span>'
+            f'<span class="pending-query-text">Retrieving results for <strong>{label}</strong>…</span>'
+            "</div>",
+            unsafe_allow_html=True,
+        )
+
     # ──────────────────────────────────────────
     # WELCOME (AT TOP WHEN NEW)
     # ──────────────────────────────────────────
@@ -3081,7 +3143,7 @@ def main():
     for idx, ex in enumerate(theme["examples"]):
         with starter_cols[idx % 2]:
             if st.button(f"{theme['icon']} {ex}", key=f"starter_{current_mode}_{idx}", use_container_width=True):
-                queue_prompt(current_mode, starter_prompt_for(current_mode, ex))
+                queue_prompt(current_mode, starter_prompt_for(current_mode, ex), origin="starter", label=ex)
                 st.rerun()
     st.markdown("---")
 
@@ -3245,6 +3307,7 @@ def main():
         st.session_state.pending_prompts[current_mode] = None
         queued_action = st.session_state.queued_action[current_mode]
         st.session_state.queued_action[current_mode] = None
+        st.session_state.pending_prompt_meta[current_mode] = None
 
     if prompt:
         ts = datetime.now().strftime("%b %d, %I:%M %p")
