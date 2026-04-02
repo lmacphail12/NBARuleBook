@@ -1516,8 +1516,248 @@ div[data-testid="stChatInput"] textarea::placeholder,
 </style>
 """
 
+
+def build_visual_overrides_awwwards(theme: dict, dark: bool) -> str:
+    p = theme["primary_color"]
+    s = theme["secondary_color"]
+    if dark:
+        paper = "#070B14"
+        panel = "#10192A"
+        panel_alt = "#17253C"
+        text = "#EDF4FF"
+        muted = "#9AACCA"
+        border = "rgba(181, 205, 240, 0.22)"
+        shadow = "rgba(2, 7, 14, 0.55)"
+        veil = "rgba(7, 11, 20, 0.74)"
+    else:
+        paper = "#EDE8DE"
+        panel = "#F9F5ED"
+        panel_alt = "#F2EBDD"
+        text = "#1B2532"
+        muted = "#5F6F83"
+        border = "rgba(27, 37, 50, 0.16)"
+        shadow = "rgba(61, 64, 70, 0.22)"
+        veil = "rgba(237, 232, 222, 0.84)"
+
+    return f"""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Manrope:wght@400;500;600;700&family=JetBrains+Mono:wght@500&display=swap');
+
+:root {{
+    --paper: {paper};
+    --panel: {panel};
+    --panel-alt: {panel_alt};
+    --ink: {text};
+    --muted: {muted};
+    --line: {border};
+    --shadow: {shadow};
+    --veil: {veil};
+}}
+
+.stApp {{
+    background:
+        radial-gradient(1300px 740px at -6% -16%, {p}2E 0%, transparent 58%),
+        radial-gradient(980px 560px at 104% -10%, {s}2B 0%, transparent 62%),
+        radial-gradient(840px 470px at 42% 110%, {p}17 0%, transparent 68%),
+        linear-gradient(160deg, {paper} 0%, {panel_alt} 64%, {paper} 100%) !important;
+    background-attachment: fixed !important;
+    animation: aurora-drift 18s ease-in-out infinite alternate;
+}}
+.main {{
+    background: transparent !important;
+    padding-top: 1.2rem !important;
+}}
+
+html, body, .stApp, .stMarkdown, .stButton button, .stTextInput, .stSelectbox, .stChatInput {{
+    font-family: "Manrope", "Segoe UI", sans-serif !important;
+}}
+h1, h2, h3, .hero-title, .section-label {{
+    font-family: "Space Grotesk", "Segoe UI", sans-serif !important;
+    letter-spacing: -0.012em;
+}}
+code, pre, .stCodeBlock, .stJson {{
+    font-family: "JetBrains Mono", ui-monospace, monospace !important;
+}}
+
+p, span, li, label, .stMarkdown p, .stMarkdown li {{
+    color: var(--ink) !important;
+    -webkit-text-fill-color: var(--ink) !important;
+}}
+.msg-ts, .chip-intro, .split-subhead, .relevance-note, .bookmark-meta {{
+    color: var(--muted) !important;
+    -webkit-text-fill-color: var(--muted) !important;
+}}
+
+.hero-shell {{
+    border: 1px solid var(--line) !important;
+    border-radius: 24px !important;
+    background: linear-gradient(150deg, {panel}D8 0%, {panel_alt}F2 100%) !important;
+    box-shadow: 0 28px 44px var(--shadow), inset 0 1px 0 rgba(255,255,255,0.13);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    overflow: hidden;
+    animation: hero-rise 0.7s ease both;
+}}
+.hero-shell::after {{
+    content: "";
+    position: absolute;
+    inset: 0;
+    background:
+        linear-gradient(128deg, transparent 0%, transparent 48%, {s}12 100%),
+        radial-gradient(460px 190px at 88% 0%, {p}1F 0%, transparent 72%);
+    pointer-events: none;
+}}
+.hero-kicker {{
+    border: 1px solid {p}88 !important;
+    background: linear-gradient(135deg, {p}2E 0%, {s}1A 100%) !important;
+    color: var(--ink) !important;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    font-size: 0.72rem !important;
+    font-weight: 700 !important;
+}}
+.hero-title {{
+    font-size: clamp(1.85rem, 2.5vw, 2.65rem) !important;
+    line-height: 1.06 !important;
+    letter-spacing: -0.02em !important;
+}}
+.hero-sub {{
+    color: var(--muted) !important;
+    max-width: 68ch;
+}}
+
+.stChatMessage, .answer-card, .source-rail, .helper-card, .bookmark-card {{
+    border: 1px solid var(--line) !important;
+    border-radius: 18px !important;
+    background: linear-gradient(160deg, {panel}D0 0%, {panel_alt}EF 100%) !important;
+    box-shadow: 0 18px 30px var(--shadow), inset 0 1px 0 rgba(255,255,255,0.10);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+}}
+.answer-section {{
+    border-left: 3px solid {p} !important;
+    border-radius: 14px !important;
+    background: linear-gradient(120deg, {p}14 0%, transparent 74%) !important;
+}}
+.section-label {{
+    color: {p} !important;
+    text-transform: uppercase;
+    letter-spacing: 0.09em;
+    font-size: 0.72rem !important;
+    font-weight: 700 !important;
+}}
+.source-excerpt, .quote-card {{
+    border: 1px solid var(--line) !important;
+    border-radius: 14px !important;
+    background: linear-gradient(130deg, {p}10 0%, transparent 67%) !important;
+}}
+
+div[data-testid="stButton"] button {{
+    border-radius: 999px !important;
+    border: 1px solid var(--line) !important;
+    background: linear-gradient(180deg, {panel}D6 0%, {panel_alt}EA 100%) !important;
+    color: var(--ink) !important;
+    transition: transform 0.16s ease, box-shadow 0.16s ease, border-color 0.16s ease, background 0.16s ease;
+    min-height: 2.65rem;
+    font-weight: 650 !important;
+}}
+div[data-testid="stButton"] button:hover {{
+    border-color: {p}88 !important;
+    background: linear-gradient(180deg, {p}24 0%, {panel_alt}E4 100%) !important;
+    transform: translateY(-1px) scale(1.01);
+    box-shadow: 0 10px 24px var(--shadow);
+}}
+div[data-testid="stButton"] button[kind="primary"] {{
+    border: none !important;
+    color: #fff !important;
+    background: linear-gradient(135deg, {p} 0%, {s} 100%) !important;
+    box-shadow: 0 12px 24px {p}44;
+}}
+div[data-testid="stButton"] button:focus {{
+    outline: none !important;
+    box-shadow: 0 0 0 3px {p}33 !important;
+}}
+
+div[data-testid="stExpander"] {{
+    border: 1px solid var(--line) !important;
+    border-radius: 16px !important;
+    background: linear-gradient(155deg, {panel}CC 0%, {panel_alt}F0 100%) !important;
+    box-shadow: 0 16px 28px var(--shadow);
+    overflow: hidden;
+}}
+div[data-testid="stExpander"] summary {{
+    font-family: "Space Grotesk", sans-serif !important;
+    font-weight: 600 !important;
+}}
+
+div[data-testid="stChatInput"] {{
+    background: var(--paper) !important;
+    border: 1px solid var(--line) !important;
+    border-radius: 18px !important;
+    box-shadow: none !important;
+}}
+div[data-testid="stChatInput"] > div {{
+    background: var(--paper) !important;
+    border-radius: 18px !important;
+}}
+.stChatFloatingInputContainer,
+[data-testid="stChatInputContainer"],
+[data-testid="stBottomBlockContainer"],
+[data-testid="stBottomBlockContainer"] > div,
+[data-testid="stBottom"],
+section[data-testid="stBottom"],
+section[data-testid="stBottom"] > div {{
+    background: var(--veil) !important;
+    box-shadow: none !important;
+    border: none !important;
+}}
+.stChatInputContainer {{
+    background: var(--veil) !important;
+    border: none !important;
+}}
+div[data-testid="stChatInput"] textarea,
+.stChatInputContainer textarea,
+[data-baseweb="textarea"] textarea {{
+    background: var(--paper) !important;
+    color: var(--ink) !important;
+    -webkit-text-fill-color: var(--ink) !important;
+}}
+div[data-testid="stChatInput"] textarea::placeholder,
+.stChatInputContainer textarea::placeholder {{
+    color: var(--muted) !important;
+    -webkit-text-fill-color: var(--muted) !important;
+}}
+
+[data-testid="stSidebar"], [data-testid="collapsedControl"] {{
+    display: none !important;
+}}
+footer {{
+    display: none !important;
+}}
+
+.mobile-nav {{
+    border: 1px solid var(--line) !important;
+    background: linear-gradient(145deg, {p}AA 0%, {s}AA 100%) !important;
+    box-shadow: 0 12px 26px var(--shadow);
+}}
+.mobile-nav a {{
+    color: #fff !important;
+    font-family: "Space Grotesk", sans-serif !important;
+}}
+
+@keyframes hero-rise {{
+    from {{ transform: translateY(8px); opacity: 0.62; }}
+    to {{ transform: translateY(0); opacity: 1; }}
+}}
+@keyframes aurora-drift {{
+    0% {{ filter: saturate(1) hue-rotate(0deg); }}
+    100% {{ filter: saturate(1.08) hue-rotate(-6deg); }}
+}}
+</style>
+"""
+
 st.markdown(build_css(THEMES[st.session_state.mode], st.session_state.dark_mode), unsafe_allow_html=True)
-st.markdown(build_visual_overrides(THEMES[st.session_state.mode], st.session_state.dark_mode), unsafe_allow_html=True)
+st.markdown(build_visual_overrides_awwwards(THEMES[st.session_state.mode], st.session_state.dark_mode), unsafe_allow_html=True)
 
 # Auto-scroll JS (mobile)
 st.markdown("""
