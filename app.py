@@ -1309,8 +1309,17 @@ div[data-testid="stChatInput"] > div {{
     background: var(--paper) !important;
     border-radius: 18px !important;
 }}
+.stChatFloatingInputContainer,
+[data-testid="stChatInputContainer"],
+[data-testid="stBottomBlockContainer"],
+[data-testid="stBottomBlockContainer"] > div,
+[data-testid="stBottom"] {{
+    background: var(--paper) !important;
+    box-shadow: none !important;
+    border: none !important;
+}}
 .stChatInputContainer {{
-    background: transparent !important;
+    background: var(--paper) !important;
     border: none !important;
 }}
 div[data-testid="stChatInput"] textarea,
@@ -2758,10 +2767,6 @@ def main():
     model_arn = runtime_config["model_arn"]
     quiz_model_id = runtime_config["quiz_model_id"]
     assistant_history = [msg for msg in current_messages if msg["role"] == "assistant"]
-    question_count = sum(1 for msg in current_messages if msg.get("role") == "user")
-    answer_count = len(assistant_history)
-    bookmark_count = len(get_bookmarks(current_mode))
-    feedback_count = len(get_feedback_store(current_mode))
 
     # ──────────────────────────────────────────
     # MODE SWITCH
@@ -2793,79 +2798,26 @@ def main():
             st.session_state.dark_mode = not st.session_state.dark_mode
             st.rerun()
 
-    with st.expander("Controls, Retrieval, and Session Tools", expanded=False):
-        settings_col1, settings_col2 = st.columns(2, gap="large")
-        with settings_col1:
-            st.markdown("#### Retrieval")
-            retrieval_settings["strict_grounding"] = st.toggle(
-                "Strict grounding",
-                value=retrieval_settings["strict_grounding"],
-                key=f"strict_grounding_{current_mode}",
-                help="Prefer no-answer states over speculative synthesis.",
-            )
-            retrieval_settings["exact_match_bias"] = st.toggle(
-                "Exact clause bias",
-                value=retrieval_settings["exact_match_bias"],
-                key=f"exact_bias_{current_mode}",
-                help="Prefer exact definitions and clause wording that reuse your terms.",
-            )
-            retrieval_settings["number_of_results"] = st.slider(
-                "Results to retrieve",
-                min_value=3,
-                max_value=12,
-                value=retrieval_settings["number_of_results"],
-                key=f"results_{current_mode}",
-            )
-            retrieval_settings["max_sources"] = st.slider(
-                "Sources to show",
-                min_value=1,
-                max_value=6,
-                value=retrieval_settings["max_sources"],
-                key=f"sources_{current_mode}",
-            )
-            if current_mode in ("cba", "both"):
-                retrieval_settings["include_operations_manual"] = st.toggle(
-                    "Include Operations Manual",
-                    value=retrieval_settings["include_operations_manual"],
-                    key=f"ops_manual_{current_mode}",
-                )
-
-        with settings_col2:
-            st.markdown("#### Session")
-            render_sidebar_metrics(
-                current_mode,
-                question_count=question_count,
-                answer_count=answer_count,
-                bookmark_count=bookmark_count,
-                feedback_count=feedback_count,
-            )
-            action_cols = st.columns(2)
-            with action_cols[0]:
-                if st.button("Clear mode history", key=f"clear_mode_{current_mode}", use_container_width=True):
-                    clear_mode_state(current_mode)
-                    st.rerun()
-            with action_cols[1]:
-                if st.button("Refresh view", key=f"refresh_mode_{current_mode}", use_container_width=True):
-                    st.rerun()
-
-            st.session_state.export_format = st.selectbox(
-                "Export style",
-                EXPORT_FORMATS,
-                index=EXPORT_FORMATS.index(st.session_state.export_format),
-                key="export_style",
-            )
-            if current_messages:
-                md_export = export_chat(current_messages, current_mode, st.session_state.export_format)
-                ts_str = datetime.now().strftime("%Y%m%d_%H%M")
-                st.download_button(
-                    label="Download session",
-                    data=md_export,
-                    file_name=f"nba_{current_mode}_{ts_str}.md",
-                    mime="text/markdown",
-                    use_container_width=True,
-                )
-        st.markdown("---")
-        render_sidebar_bookmarks(current_mode)
+    # ──────────────────────────────────────────
+    # WELCOME (AT TOP WHEN NEW)
+    # ──────────────────────────────────────────
+    if len(current_messages) == 0:
+        st.markdown(
+            f"""
+            <div style="text-align:center;padding:0.8rem 0 1.2rem 0;">
+                <h2 style="color:{theme['primary_color']};margin-bottom:0.35rem;">{theme['icon']} Welcome!</h2>
+                <p style="font-size:1.08rem;margin:0;">
+                    {"Ask me anything about NBA rules, regulations, and gameplay."
+                     if current_mode == "rulebook"
+                     else "Ask crossbook questions that connect on-court rules with contracts, roster rules, and league operations."
+                     if current_mode == "both"
+                     else "Ask me about NBA contracts, salary cap, and league business rules."}
+                </p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        st.caption("Use the chips and starter prompts below to jump right in.")
 
     # ──────────────────────────────────────────
     # HEADER
@@ -3019,28 +2971,9 @@ def main():
                 st.rerun()
 
     # ──────────────────────────────────────────
-    # WELCOME SCREEN (no messages yet)
-    # ──────────────────────────────────────────
-    if len(current_messages) == 0:
-        _, mid, _ = st.columns([1, 2, 1])
-        with mid:
-            st.markdown(f"""
-            <div style="text-align:center;padding:2rem;">
-                <h2 style="color:{theme['primary_color']};">{theme['icon']} Welcome!</h2>
-                <p style="font-size:1.1rem;">
-                    {"Ask me anything about NBA rules, regulations, and gameplay."
-                     if current_mode == "rulebook"
-                     else "Ask crossbook questions that connect on-court rules with contracts, roster rules, and league operations."
-                     if current_mode == "both"
-                     else "Ask me about NBA contracts, salary cap, and league business rules."}
-                </p>
-            </div>""", unsafe_allow_html=True)
-            st.markdown("**💡 Tip:** Use the chips or starter prompts above, then refine with the Workbench.")
-
-    # ──────────────────────────────────────────
     # CHAT HISTORY
     # ──────────────────────────────────────────
-    else:
+    if len(current_messages) > 0:
         for idx, msg in enumerate(current_messages):
             with st.chat_message(msg["role"]):
                 if msg["role"] == "assistant":
