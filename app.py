@@ -7,6 +7,7 @@ import os
 import html
 import time
 import hashlib
+import random
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from botocore.exceptions import ClientError, ParamValidationError
@@ -302,6 +303,7 @@ def init_session_state():
         "mode": "rulebook",
         "dark_mode": False,
         "response_mode": "balanced",
+        "console_notice": "",
         "session_ids": {
             **{mode: None for mode in MODE_KEYS},
             **{key: None for key in DUAL_MODE_SESSION_KEYS},
@@ -483,6 +485,85 @@ def queue_prompt(
         "retrieval_overrides": retrieval_overrides or {},
     }
     st.session_state.queued_action[mode] = action_key
+
+
+def random_starter_prompt(mode: str):
+    candidates = list(QUICK_CHIPS.get(mode, [])) + list(THEMES[mode].get("examples", []))
+    if not candidates:
+        return None, None
+    label = random.choice(candidates)
+    return label, starter_prompt_for(mode, label)
+
+
+def clear_mode_cache(mode: str):
+    st.session_state.response_cache_by_mode[mode] = {}
+    if mode == "both":
+        st.session_state.response_cache_by_mode["both"] = {}
+
+
+def execute_console_command(raw_command: str, current_mode: str):
+    command = (raw_command or "").strip()
+    if not command:
+        return False
+
+    lower = command.lower()
+    if lower in {"/help", "help"}:
+        st.session_state.console_notice = (
+            "Commands: /mode rulebook|cba, /profile fast|balanced|deep, "
+            "/clear, /cache, /reroll, /ask <question>"
+        )
+        return True
+
+    if lower.startswith("/mode "):
+        target = lower.split("/mode ", 1)[1].strip()
+        if target in {"rulebook", "cba"}:
+            st.session_state.mode = target
+            st.session_state.console_notice = f"Switched mode to {target.title()}."
+            return True
+        st.session_state.console_notice = "Unknown mode. Use /mode rulebook or /mode cba."
+        return True
+
+    if lower.startswith("/profile "):
+        target = lower.split("/profile ", 1)[1].strip()
+        if target in RESPONSE_PROFILES:
+            st.session_state.response_mode = target
+            st.session_state.console_notice = f"Response profile set to {RESPONSE_PROFILES[target]['label']}."
+            return True
+        st.session_state.console_notice = "Unknown profile. Use /profile fast, /profile balanced, or /profile deep."
+        return True
+
+    if lower in {"/clear", "clear"}:
+        clear_mode_state(current_mode)
+        st.session_state.console_notice = "Cleared current mode history."
+        return True
+
+    if lower in {"/cache", "/cache clear"}:
+        clear_mode_cache(current_mode)
+        st.session_state.console_notice = "Cleared response cache for current mode."
+        return True
+
+    if lower in {"/reroll", "/starter"}:
+        label, prompt = random_starter_prompt(current_mode)
+        if prompt:
+            queue_prompt(current_mode, prompt, origin="console", label=label or "Random starter")
+            st.session_state.console_notice = f"Queued random starter: {label}."
+            return True
+        st.session_state.console_notice = "No starter available in this mode."
+        return True
+
+    if lower.startswith("/ask "):
+        question = command.split("/ask ", 1)[1].strip()
+        if question:
+            queue_prompt(current_mode, question, origin="console", label=question[:72])
+            st.session_state.console_notice = "Queued command-line question."
+            return True
+        st.session_state.console_notice = "Usage: /ask <your question>"
+        return True
+
+    # Treat plain text as immediate ask to mimic command palette behavior.
+    queue_prompt(current_mode, command, origin="console", label=command[:72])
+    st.session_state.console_notice = "Queued prompt from command line."
+    return True
 
 
 def response_profile() -> dict:
@@ -1919,6 +2000,106 @@ footer {{
     font-family: "Space Grotesk", sans-serif !important;
 }}
 
+.sys-shell {{
+    position: relative;
+    overflow: hidden;
+    border: 1px solid var(--line);
+    border-radius: 18px;
+    padding: 1.05rem 1.05rem 1rem 1.05rem;
+    margin: 0.42rem 0 0.92rem 0;
+    background:
+        radial-gradient(560px 180px at 92% -20%, {s}2F 0%, transparent 68%),
+        radial-gradient(480px 220px at -12% 110%, {p}28 0%, transparent 74%),
+        linear-gradient(150deg, {panel}CC 0%, {panel_alt}F2 100%);
+    box-shadow: 0 16px 34px var(--shadow), inset 0 1px 0 rgba(255,255,255,0.12);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    animation: hero-rise 0.62s ease both;
+}}
+.sys-shell::after {{
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background: linear-gradient(128deg, transparent 0%, transparent 52%, {p}10 100%);
+}}
+.sys-nav {{
+    position: relative;
+    z-index: 1;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.36rem;
+    margin-bottom: 0.72rem;
+}}
+.sys-nav-pill {{
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.67rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: 0.16rem 0.52rem;
+    color: var(--muted) !important;
+    background: {paper}66;
+}}
+.sys-headline {{
+    position: relative;
+    z-index: 1;
+    font-family: "JetBrains Mono", monospace;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    font-size: 0.68rem;
+    color: var(--muted) !important;
+    margin-bottom: 0.3rem;
+}}
+.sys-title {{
+    position: relative;
+    z-index: 1;
+    font-family: "Space Grotesk", sans-serif;
+    font-size: clamp(1.3rem, 2.05vw, 1.85rem);
+    font-weight: 700;
+    line-height: 1.04;
+    color: var(--ink) !important;
+}}
+.sys-subline {{
+    position: relative;
+    z-index: 1;
+    margin-top: 0.22rem;
+    font-size: 0.84rem;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--muted) !important;
+}}
+.sys-metrics {{
+    position: relative;
+    z-index: 1;
+    margin-top: 0.68rem;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.46rem;
+}}
+.sys-metrics span {{
+    display: block;
+    border: 1px solid var(--line);
+    border-radius: 11px;
+    padding: 0.42rem 0.5rem;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.76rem;
+    letter-spacing: 0.05em;
+    color: var(--ink) !important;
+    background: {paper}54;
+    text-align: center;
+}}
+.sys-notice {{
+    border: 1px solid var(--line);
+    border-radius: 11px;
+    padding: 0.48rem 0.62rem;
+    margin: 0.56rem 0 0.84rem 0;
+    font-size: 0.81rem;
+    color: var(--ink) !important;
+    background: linear-gradient(135deg, {p}1C 0%, {s}16 100%);
+}}
+
 .pending-query-banner {{
     display: flex;
     align-items: center;
@@ -2009,6 +2190,15 @@ footer {{
     background: linear-gradient(135deg, {p}10 0%, transparent 72%);
 }}
 
+@media (max-width: 900px) {{
+    .sys-shell {{
+        padding: 0.92rem 0.84rem;
+    }}
+    .sys-metrics {{
+        grid-template-columns: 1fr;
+    }}
+}}
+
 @keyframes hero-rise {{
     from {{ transform: translateY(8px); opacity: 0.62; }}
     to {{ transform: translateY(0); opacity: 1; }}
@@ -2036,6 +2226,19 @@ function getChatInput(){
 function focusChatInput(){
   const input = getChatInput();
   if(input){ input.focus(); }
+}
+function focusCommandInput(){
+  const inputs = Array.from(document.querySelectorAll('input'));
+  const command = inputs.find((node) => {
+    const p = (node.getAttribute('placeholder') || "").toLowerCase();
+    return p.includes('/ask') || p.includes('deploy command');
+  });
+  if(command){
+    command.focus();
+    command.select();
+    return true;
+  }
+  return false;
 }
 function scrollToBottom(){
   if(window.innerWidth <= 768){
@@ -2068,6 +2271,9 @@ document.addEventListener('keydown', (e) => {
     }
   }
   if(!typing && !e.metaKey && !e.ctrlKey && !e.altKey){
+    if(e.key === '/' && focusCommandInput()){
+      e.preventDefault();
+    }
     if(e.key === '1' && clickMode('Rulebook')){
       e.preventDefault();
     }
@@ -3366,6 +3572,95 @@ def render_mobile_nav(current_mode: str):
     st.markdown(f'<div class="mobile-nav">{"".join(links)}</div>', unsafe_allow_html=True)
 
 
+def render_system_shell(current_mode: str, active_response_mode: str, current_messages: list, assistant_history: list):
+    theme = THEMES[current_mode]
+    module_labels = ["STATS", "FILM", "GALAXY", "COMPARE", "DASHBOARD", "NOTES", "LOTTERY"]
+    nav_html = "".join(f'<span class="sys-nav-pill">{label}</span>' for label in module_labels)
+    q_count = sum(1 for msg in current_messages if msg.get("role") == "user")
+    cache_count = len(_cache_store(current_mode))
+
+    st.markdown(
+        f"""
+        <div class="sys-shell">
+            <div class="sys-nav">{nav_html}</div>
+            <div class="sys-headline">SYS.INIT // {datetime.now().strftime("%Y")}</div>
+            <div class="sys-title">{theme["title"]}</div>
+            <div class="sys-subline">ALL SYSTEMS OPERATIONAL · MODE {theme["name"]} · PROFILE {RESPONSE_PROFILES[active_response_mode]["label"].upper()}</div>
+            <div class="sys-metrics">
+                <span>QUESTIONS {q_count}</span>
+                <span>ANSWERS {len(assistant_history)}</span>
+                <span>CACHE {cache_count}</span>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    module_cols = st.columns(6, gap="small")
+    with module_cols[0]:
+        if st.button("RE-ROLL STARTER", key=f"sys_reroll_{current_mode}", use_container_width=True):
+            label, prompt = random_starter_prompt(current_mode)
+            if prompt:
+                queue_prompt(current_mode, prompt, origin="console_module", label=label or "Random starter")
+                st.session_state.console_notice = f"Module queued: {label}."
+            st.rerun()
+    with module_cols[1]:
+        if st.button("FAST MODE", key=f"sys_fast_{current_mode}", use_container_width=True):
+            st.session_state.response_mode = "fast"
+            st.session_state.console_notice = "Switched profile to Fast."
+            st.rerun()
+    with module_cols[2]:
+        if st.button("BALANCED", key=f"sys_balanced_{current_mode}", use_container_width=True):
+            st.session_state.response_mode = "balanced"
+            st.session_state.console_notice = "Switched profile to Balanced."
+            st.rerun()
+    with module_cols[3]:
+        if st.button("DEEP MODE", key=f"sys_deep_{current_mode}", use_container_width=True):
+            st.session_state.response_mode = "deep"
+            st.session_state.console_notice = "Switched profile to Deep Accuracy."
+            st.rerun()
+    with module_cols[4]:
+        if st.button("STRICT RE-RUN", key=f"sys_strict_rerun_{current_mode}", use_container_width=True):
+            latest = next((m for m in reversed(assistant_history) if (m.get("question") or "").strip()), None)
+            if latest:
+                queue_prompt(
+                    current_mode,
+                    latest["question"].strip(),
+                    origin="strict_rerun",
+                    label="Strict grounding rerun",
+                    retrieval_overrides={
+                        "strict_grounding": True,
+                        "exact_match_bias": True,
+                        "number_of_results": 8,
+                        "max_sources": 5,
+                    },
+                )
+                st.session_state.console_notice = "Queued strict re-run for latest answered question."
+            else:
+                st.session_state.console_notice = "No prior answered question available for strict re-run."
+            st.rerun()
+    with module_cols[5]:
+        if st.button("CLEAR CACHE", key=f"sys_cache_clear_{current_mode}", use_container_width=True):
+            clear_mode_cache(current_mode)
+            st.session_state.console_notice = "Cleared response cache for current mode."
+            st.rerun()
+
+    with st.form(key=f"sys_console_form_{current_mode}", clear_on_submit=True):
+        command = st.text_input(
+            "Command",
+            key=f"sys_cmd_{current_mode}",
+            label_visibility="collapsed",
+            placeholder="/ask Explain clear path foul criteria with citations",
+        )
+        submitted = st.form_submit_button("DEPLOY COMMAND", use_container_width=True)
+    if submitted and command.strip():
+        execute_console_command(command, current_mode)
+        st.rerun()
+
+    if st.session_state.get("console_notice"):
+        st.markdown(f'<div class="sys-notice">{html_safe(st.session_state.console_notice)}</div>', unsafe_allow_html=True)
+
+
 def render_sidebar_metrics(mode: str, question_count: int, answer_count: int, bookmark_count: int, feedback_count: int):
     metrics = [
         ("Questions", question_count),
@@ -3461,6 +3756,7 @@ def export_chat(messages: list, mode: str, export_format: str = "Transcript") ->
 def main():
     current_mode = st.session_state.mode
     current_messages = get_messages(current_mode)
+    assistant_history = [msg for msg in current_messages if msg.get("role") == "assistant"]
     runtime_config = get_mode_runtime_config(current_mode)
     retrieval_settings = get_retrieval_settings(current_mode)
     theme = THEMES[current_mode]
@@ -3515,77 +3811,6 @@ def main():
         f"{RESPONSE_PROFILES[active_response_mode]['description']}"
     )
 
-    with st.expander("Advanced", expanded=False):
-        adv_left, adv_right = st.columns(2, gap="large")
-        with adv_left:
-            st.markdown("#### Retrieval Controls")
-            retrieval_settings["strict_grounding"] = st.toggle(
-                "Strict grounding",
-                value=retrieval_settings["strict_grounding"],
-                key=f"strict_grounding_{current_mode}",
-                help="Prefer abstaining over unsupported synthesis.",
-            )
-            retrieval_settings["exact_match_bias"] = st.toggle(
-                "Exact clause bias",
-                value=retrieval_settings["exact_match_bias"],
-                key=f"exact_bias_{current_mode}",
-                help="Prioritize clause language that reuses your query terms.",
-            )
-            retrieval_settings["number_of_results"] = st.slider(
-                "Retrieved chunks",
-                min_value=3,
-                max_value=12,
-                value=retrieval_settings["number_of_results"],
-                key=f"results_{current_mode}",
-            )
-            retrieval_settings["max_sources"] = st.slider(
-                "Citations shown",
-                min_value=1,
-                max_value=6,
-                value=retrieval_settings["max_sources"],
-                key=f"sources_{current_mode}",
-            )
-            if current_mode in ("cba", "both"):
-                retrieval_settings["include_operations_manual"] = st.toggle(
-                    "Include Operations Manual",
-                    value=retrieval_settings["include_operations_manual"],
-                    key=f"ops_manual_{current_mode}",
-                )
-        with adv_right:
-            st.markdown("#### Session Tools")
-            if st.button("Clear current mode history", key=f"clear_mode_{current_mode}", use_container_width=True):
-                clear_mode_state(current_mode)
-                st.rerun()
-            st.session_state.export_format = st.selectbox(
-                "Export style",
-                EXPORT_FORMATS,
-                index=EXPORT_FORMATS.index(st.session_state.export_format),
-                key="export_style",
-            )
-            if current_messages:
-                md_export = export_chat(current_messages, current_mode, st.session_state.export_format)
-                ts_str = datetime.now().strftime("%Y%m%d_%H%M")
-                st.download_button(
-                    label="Download session",
-                    data=md_export,
-                    file_name=f"nba_{current_mode}_{ts_str}.md",
-                    mime="text/markdown",
-                    use_container_width=True,
-                )
-            render_sidebar_bookmarks(current_mode)
-
-    pending_prompt = st.session_state.pending_prompts.get(current_mode)
-    pending_meta = st.session_state.pending_prompt_meta.get(current_mode) or {}
-    if pending_prompt and pending_meta.get("origin") in {"quick_chip", "starter"}:
-        label = html.escape(pending_meta.get("label", "Quick query"))
-        st.markdown(
-            '<div class="pending-query-banner">'
-            '<span class="pending-query-dot"></span>'
-            f'<span class="pending-query-text">Retrieving results for <strong>{label}</strong>…</span>'
-            "</div>",
-            unsafe_allow_html=True,
-        )
-
     # ──────────────────────────────────────────
     # WELCOME (AT TOP WHEN NEW)
     # ──────────────────────────────────────────
@@ -3607,17 +3832,50 @@ def main():
         )
         st.caption("Use the chips and starter prompts below to jump right in.")
 
+    render_system_shell(current_mode, active_response_mode, current_messages, assistant_history)
+
+    pending_prompt = st.session_state.pending_prompts.get(current_mode)
+    pending_meta = st.session_state.pending_prompt_meta.get(current_mode) or {}
+    if pending_prompt and pending_meta.get("origin") in {"quick_chip", "starter", "console", "console_module", "strict_rerun"}:
+        label = html.escape(pending_meta.get("label", "Quick query"))
+        st.markdown(
+            '<div class="pending-query-banner">'
+            '<span class="pending-query-dot"></span>'
+            f'<span class="pending-query-text">Retrieving results for <strong>{label}</strong>…</span>'
+            "</div>",
+            unsafe_allow_html=True,
+        )
+
+    with st.expander("Session Library", expanded=False):
+        lib_left, lib_right = st.columns(2, gap="large")
+        with lib_left:
+            if st.button("Clear current mode history", key=f"clear_mode_{current_mode}", use_container_width=True):
+                clear_mode_state(current_mode)
+                st.rerun()
+            st.session_state.export_format = st.selectbox(
+                "Export style",
+                EXPORT_FORMATS,
+                index=EXPORT_FORMATS.index(st.session_state.export_format),
+                key="export_style",
+            )
+            if current_messages:
+                md_export = export_chat(current_messages, current_mode, st.session_state.export_format)
+                ts_str = datetime.now().strftime("%Y%m%d_%H%M")
+                st.download_button(
+                    label="Download session",
+                    data=md_export,
+                    file_name=f"nba_{current_mode}_{ts_str}.md",
+                    mime="text/markdown",
+                    use_container_width=True,
+                )
+        with lib_right:
+            render_sidebar_bookmarks(current_mode)
+
     # ──────────────────────────────────────────
     # HEADER
     # ──────────────────────────────────────────
     st.markdown(
-        f"""
-        <div class="hero-shell">
-            <div class="hero-kicker">{theme["name"]}</div>
-            <div class="hero-title">{theme["title"]}</div>
-            <div class="hero-sub">{theme["subtitle"]}</div>
-        </div>
-        """,
+        f'<div class="hero-sub" style="margin:0.2rem 0 0.72rem 0;">{theme["subtitle"]}</div>',
         unsafe_allow_html=True,
     )
     render_mobile_nav(current_mode)
