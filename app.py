@@ -6,6 +6,8 @@ import re
 import os
 import html
 import time
+import hashlib
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from botocore.exceptions import ClientError, ParamValidationError
 
@@ -89,6 +91,35 @@ RETRIEVAL_DEFAULTS = {
     "max_sources": 3,
     "exact_match_bias": False,
     "include_operations_manual": True,
+}
+RESPONSE_PROFILES = {
+    "fast": {
+        "label": "Fast",
+        "description": "Lowest latency. May miss edge-case clauses.",
+        "progressive_first_results": 3,
+        "progressive_first_sources": 2,
+        "allow_expanded_retry": False,
+        "allow_manual_fallback": False,
+        "enforce_strict_grounding": False,
+    },
+    "balanced": {
+        "label": "Balanced",
+        "description": "Best default mix of speed and grounded coverage.",
+        "progressive_first_results": 3,
+        "progressive_first_sources": 2,
+        "allow_expanded_retry": True,
+        "allow_manual_fallback": True,
+        "enforce_strict_grounding": None,
+    },
+    "deep": {
+        "label": "Deep Accuracy",
+        "description": "Broader retrieval and stricter grounding.",
+        "progressive_first_results": 4,
+        "progressive_first_sources": 3,
+        "allow_expanded_retry": True,
+        "allow_manual_fallback": True,
+        "enforce_strict_grounding": True,
+    },
 }
 EXPORT_FORMATS = (
     "Transcript",
@@ -270,6 +301,7 @@ def init_session_state():
     defaults = {
         "mode": "rulebook",
         "dark_mode": False,
+        "response_mode": "balanced",
         "session_ids": {
             **{mode: None for mode in MODE_KEYS},
             **{key: None for key in DUAL_MODE_SESSION_KEYS},
@@ -355,6 +387,14 @@ def init_session_state():
         for mode in MODE_KEYS:
             st.session_state.feedback_by_mode.setdefault(mode, {})
 
+    if "response_cache_by_mode" not in st.session_state:
+        st.session_state.response_cache_by_mode = {mode: {} for mode in MODE_KEYS}
+        st.session_state.response_cache_by_mode["both"] = {}
+    else:
+        for mode in MODE_KEYS:
+            st.session_state.response_cache_by_mode.setdefault(mode, {})
+        st.session_state.response_cache_by_mode.setdefault("both", {})
+
     if "queued_action" not in st.session_state:
         st.session_state.queued_action = {mode: None for mode in MODE_KEYS}
     elif not isinstance(st.session_state.queued_action, dict):
@@ -412,10 +452,12 @@ def clear_mode_state(mode: str):
     st.session_state.quiz_asked[mode] = {}
     st.session_state.bookmarks_by_mode[mode] = []
     st.session_state.feedback_by_mode[mode] = {}
+    st.session_state.response_cache_by_mode[mode] = {}
     reset_quiz_state(mode)
     if mode == "both":
         for key in DUAL_MODE_SESSION_KEYS:
             st.session_state.session_ids[key] = None
+        st.session_state.response_cache_by_mode["both"] = {}
 
 
 def make_message_id() -> str:
@@ -426,13 +468,102 @@ def get_message_id(msg: dict) -> str:
     return msg.get("id") or f"legacy-{msg.get('timestamp', 'no-ts')}-{abs(hash(msg.get('content', '')))}"
 
 
-def queue_prompt(mode: str, prompt: str, action_key: str = None, origin: str = "generic", label: str = None):
+def queue_prompt(
+    mode: str,
+    prompt: str,
+    action_key: str = None,
+    origin: str = "generic",
+    label: str = None,
+    retrieval_overrides: dict = None,
+):
     st.session_state.pending_prompts[mode] = prompt
     st.session_state.pending_prompt_meta[mode] = {
         "origin": origin,
         "label": label or prompt[:88],
+        "retrieval_overrides": retrieval_overrides or {},
     }
     st.session_state.queued_action[mode] = action_key
+
+
+def response_profile() -> dict:
+    selected = st.session_state.get("response_mode", "balanced")
+    return RESPONSE_PROFILES.get(selected, RESPONSE_PROFILES["balanced"])
+
+
+def with_response_profile(base_settings: dict, response_mode: str, retrieval_overrides: dict = None) -> dict:
+    profile = RESPONSE_PROFILES.get(response_mode, RESPONSE_PROFILES["balanced"])
+    effective = dict(base_settings)
+
+    if response_mode == "fast":
+        effective["number_of_results"] = min(effective.get("number_of_results", 5), 4)
+        effective["max_sources"] = min(effective.get("max_sources", 3), 3)
+    elif response_mode == "deep":
+        effective["number_of_results"] = min(effective.get("number_of_results", 5) + 2, 10)
+        effective["max_sources"] = min(effective.get("max_sources", 3) + 1, 6)
+        effective["exact_match_bias"] = True
+
+    strict_override = profile.get("enforce_strict_grounding")
+    if strict_override is not None:
+        effective["strict_grounding"] = strict_override
+
+    if retrieval_overrides:
+        effective.update(retrieval_overrides)
+    return effective
+
+
+def progressive_first_pass_settings(settings: dict, response_mode: str) -> dict:
+    profile = RESPONSE_PROFILES.get(response_mode, RESPONSE_PROFILES["balanced"])
+    first_pass = dict(settings)
+    first_pass["number_of_results"] = min(
+        settings.get("number_of_results", 5),
+        profile.get("progressive_first_results", 3),
+    )
+    first_pass["max_sources"] = min(
+        settings.get("max_sources", 3),
+        profile.get("progressive_first_sources", 2),
+    )
+    return first_pass
+
+
+def _cache_store(mode: str) -> dict:
+    return st.session_state.response_cache_by_mode.setdefault(mode, {})
+
+
+def _cache_key(question: str, mode: str, response_mode: str, retrieval_settings: dict, session_scope: str) -> str:
+    payload = {
+        "mode": mode,
+        "response_mode": response_mode,
+        "question": question.strip().lower(),
+        "results": retrieval_settings.get("number_of_results"),
+        "sources": retrieval_settings.get("max_sources"),
+        "strict": retrieval_settings.get("strict_grounding"),
+        "exact": retrieval_settings.get("exact_match_bias"),
+        "ops": retrieval_settings.get("include_operations_manual"),
+        "session_scope": session_scope,
+    }
+    serial = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha1(serial.encode("utf-8")).hexdigest()
+
+
+def _cache_get(mode: str, cache_key: str):
+    entry = _cache_store(mode).get(cache_key)
+    if not entry:
+        return None
+    return entry.get("response"), entry.get("citations", [])
+
+
+def _cache_set(mode: str, cache_key: str, response: str, citations: list):
+    if not response or response.lower().startswith("error querying knowledge base"):
+        return
+    store = _cache_store(mode)
+    store[cache_key] = {
+        "response": response,
+        "citations": citations,
+        "created_at": time.time(),
+    }
+    if len(store) > 120:
+        oldest_key = min(store.keys(), key=lambda key: store[key].get("created_at", 0))
+        store.pop(oldest_key, None)
 
 
 def save_bookmark(mode: str, msg: dict):
@@ -682,6 +813,32 @@ def loading_state_for(mode: str) -> dict:
         "steps": ["Finding the clause", "Checking cap mechanics", "Writing the takeaway"],
         "min_display_seconds": 0.0,
     }
+
+
+def build_status_timeline_html(active_stage: str, detail: str = "") -> str:
+    stages = [
+        ("retrieving", "Retrieving"),
+        ("ranking", "Ranking"),
+        ("drafting", "Drafting"),
+        ("finalizing", "Finalizing"),
+    ]
+    stage_order = {key: idx for idx, (key, _) in enumerate(stages)}
+    active_idx = stage_order.get(active_stage, 0)
+    pills = []
+    for idx, (key, label) in enumerate(stages):
+        cls = "status-step"
+        if idx < active_idx:
+            cls += " status-done"
+        elif idx == active_idx:
+            cls += " status-active"
+        pills.append(f'<span class="{cls}">{label}</span>')
+    detail_html = f'<div class="status-detail">{html.escape(detail)}</div>' if detail else ""
+    return (
+        '<div class="status-timeline">'
+        f'{"".join(pills)}'
+        f"{detail_html}"
+        "</div>"
+    )
 
 
 def expand_query_for_retrieval(question: str, mode: str) -> str:
@@ -1790,6 +1947,67 @@ footer {{
     font-family: "Space Grotesk", sans-serif;
     letter-spacing: 0.02em;
 }}
+.status-timeline {{
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.45rem;
+    margin: 0.5rem 0 0.75rem 0;
+}}
+.status-step {{
+    font-size: 0.73rem;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: 0.22rem 0.62rem;
+    color: var(--muted) !important;
+    background: transparent;
+}}
+.status-step.status-active {{
+    color: var(--ink) !important;
+    background: linear-gradient(135deg, {p}28 0%, {s}1B 100%);
+    border-color: {p}88;
+}}
+.status-step.status-done {{
+    color: var(--ink) !important;
+    border-color: {s}77;
+    background: {s}1A;
+}}
+.status-detail {{
+    width: 100%;
+    font-size: 0.85rem;
+    color: var(--muted) !important;
+}}
+.citation-chip-row {{
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    margin-top: 0.45rem;
+}}
+.citation-chip {{
+    text-decoration: none !important;
+    font-size: 0.74rem;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: 0.2rem 0.58rem;
+    background: linear-gradient(135deg, {p}16 0%, {s}12 100%);
+    color: var(--ink) !important;
+}}
+.citation-chip:hover {{
+    border-color: {p}88;
+    background: linear-gradient(135deg, {p}28 0%, {s}1F 100%);
+}}
+.source-anchor-block {{
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 0.62rem 0.72rem;
+    margin-bottom: 0.58rem;
+    background: linear-gradient(135deg, {p}10 0%, transparent 72%);
+}}
 
 @keyframes hero-rise {{
     from {{ transform: translateY(8px); opacity: 0.62; }}
@@ -1812,16 +2030,62 @@ st.markdown(build_visual_overrides_awwwards(THEMES[st.session_state.mode], st.se
 # Auto-scroll JS (mobile)
 st.markdown("""
 <script>
+function getChatInput(){
+  return document.querySelector('[data-testid="stChatInput"] textarea, .stChatInputContainer textarea');
+}
+function focusChatInput(){
+  const input = getChatInput();
+  if(input){ input.focus(); }
+}
 function scrollToBottom(){
-  if(window.innerWidth<=768){
+  if(window.innerWidth <= 768){
     setTimeout(()=>window.scrollTo({top:document.body.scrollHeight,behavior:'smooth'}),120);
   }
 }
-const obs=new MutationObserver(()=>scrollToBottom());
-window.addEventListener('load',()=>{
-  const n=document.querySelector('.main');
-  if(n) obs.observe(n,{childList:true,subtree:true});
+function clickMode(label){
+  const buttons = Array.from(document.querySelectorAll('button'));
+  const hit = buttons.find(btn => btn.innerText && btn.innerText.trim() === label);
+  if(hit){ hit.click(); return true; }
+  return false;
+}
+function clickSend(){
+  const buttons = Array.from(document.querySelectorAll('button'));
+  const send = buttons.find(btn => {
+    const t = (btn.innerText || "").trim().toLowerCase();
+    const a = (btn.getAttribute('aria-label') || "").trim().toLowerCase();
+    return t === "send" || a.includes("send");
+  });
+  if(send){ send.click(); return true; }
+  return false;
+}
+
+document.addEventListener('keydown', (e) => {
+  const active = document.activeElement;
+  const typing = active && (active.tagName === "TEXTAREA" || active.tagName === "INPUT");
+  if((e.metaKey || e.ctrlKey) && e.key === 'Enter'){
+    if(clickSend()){
+      e.preventDefault();
+    }
+  }
+  if(!typing && !e.metaKey && !e.ctrlKey && !e.altKey){
+    if(e.key === '1' && clickMode('Rulebook')){
+      e.preventDefault();
+    }
+    if(e.key === '2' && clickMode('CBA')){
+      e.preventDefault();
+    }
+  }
+});
+
+const obs = new MutationObserver(() => {
   scrollToBottom();
+  setTimeout(focusChatInput, 40);
+});
+window.addEventListener('load', () => {
+  const n = document.querySelector('.main');
+  if(n) obs.observe(n, {childList:true,subtree:true});
+  scrollToBottom();
+  setTimeout(focusChatInput, 220);
 });
 </script>
 """, unsafe_allow_html=True)
@@ -2030,10 +2294,19 @@ def citation_title(citation: dict, mode: str) -> str:
     return base
 
 
-def render_answer_sections(text: str):
+def render_answer_sections(text: str, citations: list, mode: str, message_key: str):
+    unique_citations = dedupe_citations(citations)
     for title, body in parse_answer_sections(text).items():
+        chips_html = ""
+        if title == "Answer" and unique_citations:
+            chips = []
+            for idx, citation in enumerate(unique_citations[:4]):
+                chips.append(
+                    f'<a class="citation-chip" href="#source-{message_key}-{idx}">[{idx + 1}] {html_safe(citation_title(citation, mode))}</a>'
+                )
+            chips_html = f'<div class="citation-chip-row">{"".join(chips)}</div>'
         st.markdown(
-            f'<div class="answer-section"><div class="section-label">{html_safe(title)}</div>{html_safe(body)}</div>',
+            f'<div class="answer-section"><div class="section-label">{html_safe(title)}</div>{html_safe(body)}{chips_html}</div>',
             unsafe_allow_html=True,
         )
 
@@ -2067,35 +2340,35 @@ def render_source_panel(msg: dict, mode: str, message_key: str):
         f'border:1px solid {conf_color};">Confidence: {conf_label}</span>',
         unsafe_allow_html=True,
     )
-    spotlight_idx = st.radio(
-        "Source spotlight",
+    spotlight_idx = st.selectbox(
+        "Detailed source view",
         options=list(range(len(citations))),
-        format_func=lambda idx: citation_title(citations[idx], mode),
+        format_func=lambda idx: f"[{idx + 1}] {citation_title(citations[idx], mode)}",
         key=f"spotlight_{message_key}",
     )
     citation = citations[spotlight_idx]
     content = citation.get("content", "No content available")
-    match_terms = citation.get("match_terms", [])
-    source_mode = citation.get("source_domain")
 
     tabs = st.tabs(["Navigator", "Exact clause", "Answer vs source"])
     with tabs[0]:
-        if source_mode and mode == "both":
+        for idx, source in enumerate(citations):
+            source_mode = source.get("source_domain")
+            match_terms = source.get("match_terms", [])
+            source_text = source.get("content", "No content available")
+            preview = source_text[:280] + ("…" if len(source_text) > 280 else "")
+            lane_note = ""
+            if source_mode and mode == "both":
+                lane_note = "Rulebook lane" if source_mode == "rulebook" else "CBA / Operations lane"
             st.markdown(
-                f'<div class="split-subhead">Pulled from the {"Rulebook" if source_mode == "rulebook" else "CBA / Operations"} lane.</div>',
+                f'<div id="source-{message_key}-{idx}" class="source-anchor-block">'
+                f'<div class="split-subhead"><strong>[{idx + 1}] {html_safe(citation_title(source, mode))}</strong>'
+                f'{" · " + lane_note if lane_note else ""}</div>'
+                f'<div class="source-excerpt">{html_safe(preview)}</div>'
+                "</div>",
                 unsafe_allow_html=True,
             )
-        if match_terms:
-            st.markdown(
-                f'<div class="relevance-note">Matched on: {", ".join(match_terms)}</div>',
-                unsafe_allow_html=True,
-            )
-        if citation.get("match_score") is not None:
-            st.caption(f"Retrieval score: {citation['match_score']}")
-        preview = content[:350] + ("…" if len(content) > 350 else "")
-        st.markdown(f'<div class="source-excerpt">{html_safe(preview)}</div>', unsafe_allow_html=True)
-        if citation.get("metadata"):
-            st.json(citation["metadata"], expanded=False)
+            if match_terms:
+                st.caption(f"Matched terms: {', '.join(match_terms)}")
     with tabs[1]:
         st.markdown(f'<div class="quote-card">{html_safe(content)}</div>', unsafe_allow_html=True)
         st.code(content, language=None)
@@ -2119,6 +2392,23 @@ def render_message_controls(msg: dict, mode: str, message_key: str):
             if st.button(label, key=f"follow_{message_key}_{action_key}", use_container_width=True):
                 queue_prompt(mode, build_followup_prompt(action_key, msg, mode), action_key=action_key)
                 st.rerun()
+
+    if st.button("Re-run With Stricter Grounding", key=f"strict_rerun_{message_key}", use_container_width=True):
+        base_question = msg.get("question") or msg.get("content", "")
+        if base_question.strip():
+            queue_prompt(
+                mode,
+                base_question.strip(),
+                origin="strict_rerun",
+                label="Strict grounding rerun",
+                retrieval_overrides={
+                    "strict_grounding": True,
+                    "exact_match_bias": True,
+                    "number_of_results": 8,
+                    "max_sources": 5,
+                },
+            )
+            st.rerun()
 
     utility_cols = st.columns(4)
     with utility_cols[0]:
@@ -2150,7 +2440,7 @@ def render_assistant_message(msg: dict, mode: str):
         st.markdown('<div class="answer-card">', unsafe_allow_html=True)
         if msg.get("timestamp"):
             st.markdown(f'<div class="msg-ts">🕐 {msg["timestamp"]}</div>', unsafe_allow_html=True)
-        render_answer_sections(msg["content"])
+        render_answer_sections(msg["content"], msg.get("citations", []), mode, message_key)
         render_message_controls(msg, mode, message_key)
         with st.expander("📋 Copy response"):
             st.code(msg["content"], language=None)
@@ -2635,9 +2925,44 @@ def combine_crossbook_answers(question: str, rulebook_text: str, cba_text: str) 
     )
 
 
-def query_app_mode(question: str, mode: str, runtime_config: dict, retrieval_settings: dict):
+def query_app_mode(
+    question: str,
+    mode: str,
+    runtime_config: dict,
+    retrieval_settings: dict,
+    response_mode: str = "balanced",
+    status_cb=None,
+):
+    profile = RESPONSE_PROFILES.get(response_mode, RESPONSE_PROFILES["balanced"])
+
+    def status(stage: str, detail: str = ""):
+        if status_cb:
+            status_cb(stage, detail)
+
+    def better_candidate(curr_resp, curr_cits, new_resp, new_cits):
+        return (
+            bool(new_cits)
+            and (
+                not curr_cits
+                or len(new_cits) > len(curr_cits)
+                or not needs_reformulation(new_resp, new_cits)
+            )
+        )
+
     if mode in ("rulebook", "cba"):
         cur_session = st.session_state.session_ids.get(mode)
+        session_scope = cur_session or "new"
+        cache_key = _cache_key(question, mode, response_mode, retrieval_settings, session_scope)
+        cached = _cache_get(mode, cache_key)
+        if cached:
+            response, citations = cached
+            for citation in citations:
+                citation["source_domain"] = mode
+            status("finalizing", "Loaded from cache")
+            return response, citations
+
+        status("retrieving", "Initial retrieval pass")
+        first_pass_settings = progressive_first_pass_settings(retrieval_settings, response_mode)
         response, citations, new_session = query_knowledge_base(
             question,
             runtime_config["kb_id"],
@@ -2645,13 +2970,20 @@ def query_app_mode(question: str, mode: str, runtime_config: dict, retrieval_set
             mode,
             session_id=cur_session,
             region_name=runtime_config["region"],
-            retrieval_settings=retrieval_settings,
+            retrieval_settings=first_pass_settings,
+        )
+        status("ranking", f"{len(citations)} source matches")
+
+        needs_followup = needs_reformulation(response, citations)
+        first_pass_differs = (
+            first_pass_settings.get("number_of_results") != retrieval_settings.get("number_of_results")
+            or first_pass_settings.get("max_sources") != retrieval_settings.get("max_sources")
         )
 
-        expanded_question = expand_query_for_retrieval(question, mode)
-        if expanded_question != question and needs_reformulation(response, citations):
-            retry_response, retry_citations, new_session = query_knowledge_base(
-                expanded_question,
+        if needs_followup and first_pass_differs:
+            status("retrieving", "Escalating retrieval depth")
+            deep_response, deep_citations, new_session = query_knowledge_base(
+                question,
                 runtime_config["kb_id"],
                 runtime_config["model_arn"],
                 mode,
@@ -2659,18 +2991,31 @@ def query_app_mode(question: str, mode: str, runtime_config: dict, retrieval_set
                 region_name=runtime_config["region"],
                 retrieval_settings=retrieval_settings,
             )
-            retry_is_better = (
-                bool(retry_citations)
-                and (
-                    not citations
-                    or len(retry_citations) > len(citations)
-                    or not needs_reformulation(retry_response, retry_citations)
-                )
-            )
-            if retry_is_better:
-                response, citations = retry_response, retry_citations
+            if better_candidate(response, citations, deep_response, deep_citations):
+                response, citations = deep_response, deep_citations
+            needs_followup = needs_reformulation(response, citations)
+            status("ranking", f"{len(citations)} source matches")
 
-        if needs_reformulation(response, citations):
+        if profile.get("allow_expanded_retry", True) and needs_followup:
+            expanded_question = expand_query_for_retrieval(question, mode)
+            if expanded_question != question:
+                status("retrieving", "Retrying with targeted terms")
+                retry_response, retry_citations, new_session = query_knowledge_base(
+                    expanded_question,
+                    runtime_config["kb_id"],
+                    runtime_config["model_arn"],
+                    mode,
+                    session_id=new_session,
+                    region_name=runtime_config["region"],
+                    retrieval_settings=retrieval_settings,
+                )
+                if better_candidate(response, citations, retry_response, retry_citations):
+                    response, citations = retry_response, retry_citations
+                needs_followup = needs_reformulation(response, citations)
+                status("ranking", f"{len(citations)} source matches")
+
+        if profile.get("allow_manual_fallback", True) and needs_followup:
+            status("retrieving", "Deep fallback retrieval")
             manual_response, manual_citations = manual_retrieve_and_answer(
                 question,
                 runtime_config["kb_id"],
@@ -2679,44 +3024,105 @@ def query_app_mode(question: str, mode: str, runtime_config: dict, retrieval_set
                 runtime_config["region"],
                 retrieval_settings,
             )
-            manual_is_better = (
-                bool(manual_response)
-                and (
-                    not citations
-                    or len(manual_citations) > len(citations)
-                    or not needs_reformulation(manual_response, manual_citations)
-                )
-            )
-            if manual_is_better:
+            if better_candidate(response, citations, manual_response, manual_citations):
                 response, citations = manual_response, manual_citations
 
+        status("drafting", "Composing grounded answer")
         st.session_state.session_ids[mode] = new_session
         for citation in citations:
             citation["source_domain"] = mode
+
+        final_scope = new_session or session_scope
+        final_cache_key = _cache_key(question, mode, response_mode, retrieval_settings, final_scope)
+        _cache_set(mode, final_cache_key, response, citations)
         return response, citations
 
     rulebook_config = get_mode_runtime_config("rulebook")
     cba_config = get_mode_runtime_config("cba")
+    rb_session_scope = st.session_state.session_ids.get("both_rulebook") or "new"
+    cba_session_scope = st.session_state.session_ids.get("both_cba") or "new"
+    cross_scope = f"{rb_session_scope}:{cba_session_scope}"
+    cross_cache_key = _cache_key(question, "both", response_mode, retrieval_settings, cross_scope)
+    cross_cached = _cache_get("both", cross_cache_key)
+    if cross_cached:
+        cached_response, cached_citations = cross_cached
+        status("finalizing", "Loaded crossbook answer from cache")
+        return cached_response, cached_citations
 
-    rb_response, rb_citations, rb_session = query_knowledge_base(
-        question,
-        rulebook_config["kb_id"],
-        rulebook_config["model_arn"],
-        "rulebook",
-        session_id=st.session_state.session_ids.get("both_rulebook"),
-        region_name=rulebook_config["region"],
-        retrieval_settings=retrieval_settings,
-    )
-    cba_response, cba_citations, cba_session = query_knowledge_base(
-        question,
-        cba_config["kb_id"],
-        cba_config["model_arn"],
-        "cba",
-        session_id=st.session_state.session_ids.get("both_cba"),
-        region_name=cba_config["region"],
-        retrieval_settings=retrieval_settings,
-    )
+    status("retrieving", "Querying Rulebook and CBA in parallel")
+    first_pass_settings = progressive_first_pass_settings(retrieval_settings, response_mode)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        rb_future = pool.submit(
+            query_knowledge_base,
+            question,
+            rulebook_config["kb_id"],
+            rulebook_config["model_arn"],
+            "rulebook",
+            st.session_state.session_ids.get("both_rulebook"),
+            rulebook_config["region"],
+            first_pass_settings,
+        )
+        cba_future = pool.submit(
+            query_knowledge_base,
+            question,
+            cba_config["kb_id"],
+            cba_config["model_arn"],
+            "cba",
+            st.session_state.session_ids.get("both_cba"),
+            cba_config["region"],
+            first_pass_settings,
+        )
+        rb_response, rb_citations, rb_session = rb_future.result()
+        cba_response, cba_citations, cba_session = cba_future.result()
 
+    first_pass_differs = (
+        first_pass_settings.get("number_of_results") != retrieval_settings.get("number_of_results")
+        or first_pass_settings.get("max_sources") != retrieval_settings.get("max_sources")
+    )
+    rb_weak = needs_reformulation(rb_response, rb_citations)
+    cba_weak = needs_reformulation(cba_response, cba_citations)
+
+    if first_pass_differs and (rb_weak or cba_weak):
+        status("retrieving", "Escalating weak lane retrieval")
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            rb_retry_future = (
+                pool.submit(
+                    query_knowledge_base,
+                    question,
+                    rulebook_config["kb_id"],
+                    rulebook_config["model_arn"],
+                    "rulebook",
+                    rb_session,
+                    rulebook_config["region"],
+                    retrieval_settings,
+                )
+                if rb_weak
+                else None
+            )
+            cba_retry_future = (
+                pool.submit(
+                    query_knowledge_base,
+                    question,
+                    cba_config["kb_id"],
+                    cba_config["model_arn"],
+                    "cba",
+                    cba_session,
+                    cba_config["region"],
+                    retrieval_settings,
+                )
+                if cba_weak
+                else None
+            )
+            if rb_retry_future:
+                rb_new_response, rb_new_citations, rb_session = rb_retry_future.result()
+                if better_candidate(rb_response, rb_citations, rb_new_response, rb_new_citations):
+                    rb_response, rb_citations = rb_new_response, rb_new_citations
+            if cba_retry_future:
+                cba_new_response, cba_new_citations, cba_session = cba_retry_future.result()
+                if better_candidate(cba_response, cba_citations, cba_new_response, cba_new_citations):
+                    cba_response, cba_citations = cba_new_response, cba_new_citations
+
+    status("ranking", f"{len(rb_citations) + len(cba_citations)} combined source matches")
     st.session_state.session_ids["both_rulebook"] = rb_session
     st.session_state.session_ids["both_cba"] = cba_session
 
@@ -2725,8 +3131,13 @@ def query_app_mode(question: str, mode: str, runtime_config: dict, retrieval_set
     for citation in cba_citations:
         citation["source_domain"] = "cba"
 
+    status("drafting", "Composing crossbook synthesis")
     combined = combine_crossbook_answers(question, rb_response, cba_response)
-    return combined, rb_citations + cba_citations
+    merged_citations = rb_citations + cba_citations
+    final_cross_scope = f"{rb_session or 'new'}:{cba_session or 'new'}"
+    final_cross_key = _cache_key(question, "both", response_mode, retrieval_settings, final_cross_scope)
+    _cache_set("both", final_cross_key, combined, merged_citations)
+    return combined, merged_citations
 
 
 # ─────────────────────────────────────────────
@@ -3056,7 +3467,7 @@ def main():
     kb_id = runtime_config["kb_id"]
     model_arn = runtime_config["model_arn"]
     quiz_model_id = runtime_config["quiz_model_id"]
-    assistant_history = [msg for msg in current_messages if msg["role"] == "assistant"]
+    active_response_mode = st.session_state.get("response_mode", "balanced")
 
     # ──────────────────────────────────────────
     # MODE SWITCH
@@ -3087,6 +3498,81 @@ def main():
         if st.button(theme_icon, key="theme_toggle_main", use_container_width=True, help="Toggle theme"):
             st.session_state.dark_mode = not st.session_state.dark_mode
             st.rerun()
+
+    profile_cols = st.columns(3, gap="small")
+    for idx, profile_key in enumerate(("fast", "balanced", "deep")):
+        with profile_cols[idx]:
+            if st.button(
+                RESPONSE_PROFILES[profile_key]["label"],
+                key=f"profile_{profile_key}",
+                use_container_width=True,
+                type="primary" if active_response_mode == profile_key else "secondary",
+            ):
+                st.session_state.response_mode = profile_key
+                st.rerun()
+    st.caption(
+        f"Response mode: **{RESPONSE_PROFILES[active_response_mode]['label']}** - "
+        f"{RESPONSE_PROFILES[active_response_mode]['description']}"
+    )
+
+    with st.expander("Advanced", expanded=False):
+        adv_left, adv_right = st.columns(2, gap="large")
+        with adv_left:
+            st.markdown("#### Retrieval Controls")
+            retrieval_settings["strict_grounding"] = st.toggle(
+                "Strict grounding",
+                value=retrieval_settings["strict_grounding"],
+                key=f"strict_grounding_{current_mode}",
+                help="Prefer abstaining over unsupported synthesis.",
+            )
+            retrieval_settings["exact_match_bias"] = st.toggle(
+                "Exact clause bias",
+                value=retrieval_settings["exact_match_bias"],
+                key=f"exact_bias_{current_mode}",
+                help="Prioritize clause language that reuses your query terms.",
+            )
+            retrieval_settings["number_of_results"] = st.slider(
+                "Retrieved chunks",
+                min_value=3,
+                max_value=12,
+                value=retrieval_settings["number_of_results"],
+                key=f"results_{current_mode}",
+            )
+            retrieval_settings["max_sources"] = st.slider(
+                "Citations shown",
+                min_value=1,
+                max_value=6,
+                value=retrieval_settings["max_sources"],
+                key=f"sources_{current_mode}",
+            )
+            if current_mode in ("cba", "both"):
+                retrieval_settings["include_operations_manual"] = st.toggle(
+                    "Include Operations Manual",
+                    value=retrieval_settings["include_operations_manual"],
+                    key=f"ops_manual_{current_mode}",
+                )
+        with adv_right:
+            st.markdown("#### Session Tools")
+            if st.button("Clear current mode history", key=f"clear_mode_{current_mode}", use_container_width=True):
+                clear_mode_state(current_mode)
+                st.rerun()
+            st.session_state.export_format = st.selectbox(
+                "Export style",
+                EXPORT_FORMATS,
+                index=EXPORT_FORMATS.index(st.session_state.export_format),
+                key="export_style",
+            )
+            if current_messages:
+                md_export = export_chat(current_messages, current_mode, st.session_state.export_format)
+                ts_str = datetime.now().strftime("%Y%m%d_%H%M")
+                st.download_button(
+                    label="Download session",
+                    data=md_export,
+                    file_name=f"nba_{current_mode}_{ts_str}.md",
+                    mime="text/markdown",
+                    use_container_width=True,
+                )
+            render_sidebar_bookmarks(current_mode)
 
     pending_prompt = st.session_state.pending_prompts.get(current_mode)
     pending_meta = st.session_state.pending_prompt_meta.get(current_mode) or {}
@@ -3302,11 +3788,15 @@ def main():
     prompt = typed_prompt
     pending_prompt = st.session_state.pending_prompts[current_mode]
     queued_action = None
+    pending_meta_current = {}
     if not prompt and pending_prompt:
         prompt = pending_prompt
+        pending_meta_current = st.session_state.pending_prompt_meta.get(current_mode) or {}
         st.session_state.pending_prompts[current_mode] = None
         queued_action = st.session_state.queued_action[current_mode]
         st.session_state.queued_action[current_mode] = None
+        st.session_state.pending_prompt_meta[current_mode] = None
+    elif prompt:
         st.session_state.pending_prompt_meta[current_mode] = None
 
     if prompt:
@@ -3327,6 +3817,7 @@ def main():
             f'<span class="thinking-step">{html.escape(step)}</span>'
             for step in loading_state["steps"]
         )
+        status_timeline = st.empty()
         loading_card_steps_html = "".join(
             f'<span class="loading-step">{html.escape(step)}</span>'
             for step in loading_state["steps"]
@@ -3352,21 +3843,39 @@ def main():
 
         with st.chat_message("assistant"):
             loading_placeholder = st.empty()
+            status_timeline.markdown(build_status_timeline_html("retrieving", "Starting retrieval"), unsafe_allow_html=True)
             status_placeholder.markdown(thinking_banner_html, unsafe_allow_html=True)
             loading_placeholder.markdown(loading_html, unsafe_allow_html=True)
 
+            request_settings = with_response_profile(
+                retrieval_settings,
+                active_response_mode,
+                retrieval_overrides=pending_meta_current.get("retrieval_overrides"),
+            )
+            def set_stage(stage: str, detail: str = ""):
+                status_timeline.markdown(build_status_timeline_html(stage, detail), unsafe_allow_html=True)
+
             load_started = time.perf_counter()
-            response, citations = query_app_mode(prompt, current_mode, runtime_config, retrieval_settings)
+            response, citations = query_app_mode(
+                prompt,
+                current_mode,
+                runtime_config,
+                request_settings,
+                response_mode=active_response_mode,
+                status_cb=set_stage,
+            )
             elapsed = time.perf_counter() - load_started
             min_display_seconds = loading_state.get("min_display_seconds", 0.0)
             if elapsed < min_display_seconds:
                 time.sleep(min_display_seconds - elapsed)
             if queued_action == "bullets":
                 response = enforce_three_bullet_response(response, citations, current_mode)
+            set_stage("finalizing", "Rendering response")
 
             # Swap loading card for the actual response
             loading_placeholder.empty()
             status_placeholder.empty()
+            status_timeline.empty()
 
             resp_ts = datetime.now().strftime("%b %d, %I:%M %p")
             cross = detect_cross_mode(response, current_mode) if current_mode in ("rulebook", "cba") else None
