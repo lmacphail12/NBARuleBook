@@ -85,8 +85,8 @@ DEFAULT_MODEL_ARNS = {
 DEFAULT_QUIZ_MODEL_ID = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 RETRIEVAL_DEFAULTS = {
     "strict_grounding": True,
-    "number_of_results": 6,
-    "max_sources": 4,
+    "number_of_results": 5,
+    "max_sources": 3,
     "exact_match_bias": False,
     "include_operations_manual": True,
 }
@@ -648,7 +648,7 @@ def loading_state_for(mode: str) -> dict:
             "label": "Searching the NBA Rulebook…",
             "sub": "Locating the governing rule, checking definitions and exceptions, and preparing a clear ruling.",
             "steps": ["Finding the right rule", "Checking exceptions", "Drafting the ruling"],
-            "min_display_seconds": 0.75,
+            "min_display_seconds": 0.0,
         }
     if mode == "both":
         return {
@@ -656,14 +656,14 @@ def loading_state_for(mode: str) -> dict:
             "label": "Searching both the Rulebook and CBA lanes…",
             "sub": "Cross-checking gameplay rules against roster, contract, and operations language.",
             "steps": ["Pulling Rulebook sources", "Pulling CBA sources", "Stitching both views together"],
-            "min_display_seconds": 0.65,
+            "min_display_seconds": 0.0,
         }
     return {
         "icon": "💰",
         "label": "Searching the CBA & Salary Cap docs…",
         "sub": "Large CBA lookups can take a bit longer while the app matches clauses and trade / cap terminology.",
         "steps": ["Finding the clause", "Checking cap mechanics", "Writing the takeaway"],
-        "min_display_seconds": 0.65,
+        "min_display_seconds": 0.0,
     }
 
 
@@ -2337,7 +2337,7 @@ def query_knowledge_base(question: str, knowledge_base_id: str, model_arn: str,
                 "modelArn": model_arn,
                 "retrievalConfiguration": {
                     "vectorSearchConfiguration": {
-                        "numberOfResults": retrieval_settings.get("number_of_results", 6),
+                        "numberOfResults": retrieval_settings.get("number_of_results", 5),
                     }
                 },
             },
@@ -2449,7 +2449,7 @@ def build_manual_retrieval_queries(question: str, mode: str) -> list:
         if cleaned and cleaned not in seen:
             seen.add(cleaned)
             unique.append(cleaned)
-    return unique[:5]
+    return unique[:3]
 
 
 def build_manual_answer_prompt(question: str, mode: str, retrieval_settings: dict, source_text: str) -> str:
@@ -2479,7 +2479,7 @@ def manual_retrieve_and_answer(question: str, knowledge_base_id: str, model_arn:
                 retrievalQuery={"text": retrieval_query},
                 retrievalConfiguration={
                     "vectorSearchConfiguration": {
-                        "numberOfResults": max(retrieval_settings.get("number_of_results", 6), 6),
+                        "numberOfResults": max(retrieval_settings.get("number_of_results", 5), 4),
                     }
                 },
             )
@@ -2529,7 +2529,7 @@ def manual_retrieve_and_answer(question: str, knowledge_base_id: str, model_arn:
             accept="application/json",
             body=json.dumps({
                 "anthropic_version": "bedrock-2023-05-31",
-                "max_tokens": 1200,
+                "max_tokens": 800,
                 "messages": [{"role": "user", "content": prompt}],
             }),
         )
