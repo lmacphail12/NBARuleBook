@@ -2821,27 +2821,43 @@ Answer:
 
 
 def run_retrieve_and_generate(client, params: dict):
-    """Call Bedrock retrieve_and_generate, retrying without unsupported retrieval tuning fields."""
-    try:
-        return client.retrieve_and_generate(**params)
-    except ParamValidationError as e:
-        message = str(e)
-        if (
-            "retrievalConfiguration" in message
-            or "vectorSearchConfiguration" in message
-            or "numberOfResults" in message
-        ):
-            params["retrieveAndGenerateConfiguration"]["knowledgeBaseConfiguration"].pop("retrievalConfiguration", None)
+    """Call Bedrock retrieve_and_generate, progressively stripping unsupported fields."""
+    last_error = None
+    for _ in range(3):
+        try:
             return client.retrieve_and_generate(**params)
-        if (
-            "generationConfiguration" in message
-            or "inferenceConfig" in message
-            or "textInferenceConfig" in message
-            or "maxTokens" in message
-        ):
-            params["retrieveAndGenerateConfiguration"]["knowledgeBaseConfiguration"].pop("generationConfiguration", None)
-            return client.retrieve_and_generate(**params)
-        raise
+        except ParamValidationError as e:
+            message = str(e)
+            kb_cfg = params.get("retrieveAndGenerateConfiguration", {}).get("knowledgeBaseConfiguration", {})
+            stripped = False
+
+            if (
+                "retrievalConfiguration" in message
+                or "vectorSearchConfiguration" in message
+                or "numberOfResults" in message
+            ):
+                if "retrievalConfiguration" in kb_cfg:
+                    kb_cfg.pop("retrievalConfiguration", None)
+                    stripped = True
+
+            if (
+                "generationConfiguration" in message
+                or "inferenceConfig" in message
+                or "textInferenceConfig" in message
+                or "maxTokens" in message
+            ):
+                if "generationConfiguration" in kb_cfg:
+                    kb_cfg.pop("generationConfiguration", None)
+                    stripped = True
+
+            if not stripped:
+                raise
+
+            last_error = e
+            continue
+
+    if last_error:
+        raise last_error
 
 
 def query_knowledge_base(question: str, knowledge_base_id: str, model_arn: str,
