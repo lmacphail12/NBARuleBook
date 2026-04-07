@@ -1890,6 +1890,17 @@ div[data-testid="stChatInput"] > div {{
     border-radius: 16px !important;
     border: none !important;
 }}
+div[data-testid="stChatInput"] [data-baseweb="textarea"],
+div[data-testid="stChatInput"] [data-baseweb="textarea"] > div,
+div[data-testid="stChatInput"] .st-bh,
+div[data-testid="stChatInput"] .st-bg,
+div[data-testid="stChatInput"] .st-bi,
+div[data-testid="stChatInput"] .st-bj {{
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    border-radius: 14px !important;
+}}
 .stChatFloatingInputContainer,
 [data-testid="stChatInputContainer"],
 [data-testid="stBottomBlockContainer"],
@@ -1904,6 +1915,10 @@ section[data-testid="stBottom"] > div {{
 .stChatInputContainer {{
     background: var(--veil) !important;
     border: none !important;
+}}
+[data-testid="stChatInputContainer"] > div,
+[data-testid="stChatInputContainer"] > div > div {{
+    background: transparent !important;
 }}
 div[data-testid="stChatInput"] textarea,
 .stChatInputContainer textarea,
