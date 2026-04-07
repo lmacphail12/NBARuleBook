@@ -1870,23 +1870,25 @@ div[data-testid="stExpander"] summary {{
 }}
 
 div[data-testid="stChatInput"] {{
-    background: var(--paper) !important;
-    border: 2px solid {p}99 !important;
-    border-radius: 18px !important;
-    box-shadow: 0 0 0 1px {p}2E, 0 8px 20px var(--shadow) !important;
-    transition: border-color 0.16s ease, box-shadow 0.16s ease !important;
+    border: 1px solid var(--line) !important;
+    border-radius: 16px !important;
+    background: linear-gradient(155deg, {panel}CC 0%, {panel_alt}F0 100%) !important;
+    box-shadow: 0 16px 28px var(--shadow) !important;
+    overflow: hidden !important;
+    transition: border-color 0.16s ease, box-shadow 0.16s ease, transform 0.16s ease !important;
 }}
 div[data-testid="stChatInput"]:hover {{
-    border-color: {p}CC !important;
+    border-color: {p}88 !important;
+    box-shadow: 0 18px 30px var(--shadow) !important;
 }}
 div[data-testid="stChatInput"]:focus-within {{
     border-color: {p} !important;
-    box-shadow: 0 0 0 3px {p}30, 0 12px 24px var(--shadow) !important;
+    box-shadow: 0 0 0 3px {p}24, 0 18px 30px var(--shadow) !important;
 }}
 div[data-testid="stChatInput"] > div {{
-    background: var(--paper) !important;
-    border-radius: 18px !important;
-    border: 1px solid {p}55 !important;
+    background: transparent !important;
+    border-radius: 16px !important;
+    border: none !important;
 }}
 .stChatFloatingInputContainer,
 [data-testid="stChatInputContainer"],
@@ -1906,7 +1908,7 @@ section[data-testid="stBottom"] > div {{
 div[data-testid="stChatInput"] textarea,
 .stChatInputContainer textarea,
 [data-baseweb="textarea"] textarea {{
-    background: var(--paper) !important;
+    background: transparent !important;
     color: var(--ink) !important;
     -webkit-text-fill-color: var(--ink) !important;
 }}
