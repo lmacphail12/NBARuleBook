@@ -100,6 +100,7 @@ RESPONSE_PROFILES = {
         "progressive_first_sources": 2,
         "allow_expanded_retry": False,
         "allow_manual_fallback": False,
+        "single_pass_only": True,
         "enforce_strict_grounding": False,
     },
     "balanced": {
@@ -109,6 +110,7 @@ RESPONSE_PROFILES = {
         "progressive_first_sources": 2,
         "allow_expanded_retry": True,
         "allow_manual_fallback": True,
+        "single_pass_only": False,
         "enforce_strict_grounding": None,
     },
     "deep": {
@@ -118,6 +120,7 @@ RESPONSE_PROFILES = {
         "progressive_first_sources": 3,
         "allow_expanded_retry": True,
         "allow_manual_fallback": True,
+        "single_pass_only": False,
         "enforce_strict_grounding": True,
     },
 }
@@ -274,10 +277,26 @@ def get_confidence(citations: list):
     """Return (label, hex_color) confidence indicator based on citation quality."""
     if not citations:
         return "⚠️ Low", "#FF9800"
+
+    match_scores = [
+        float(c.get("match_score"))
+        for c in citations
+        if isinstance(c.get("match_score"), (int, float))
+    ]
+    if match_scores:
+        avg_score = sum(match_scores) / len(match_scores)
+        max_score = max(match_scores)
+        if len(match_scores) >= 3 and avg_score >= 0.22:
+            return "✅ High", "#4CAF50"
+        if (len(match_scores) >= 2 and avg_score >= 0.13) or max_score >= 0.20:
+            return "🟡 Medium", "#FFC107"
+        return "🟠 Low", "#FF9800"
+
+    # Fallback for legacy messages that do not have match_score annotations.
     with_meta = sum(1 for c in citations if c.get("metadata"))
     if len(citations) >= 3 and with_meta >= 2:
         return "✅ High", "#4CAF50"
-    elif len(citations) >= 2:
+    if len(citations) >= 2:
         return "🟡 Medium", "#FFC107"
     return "🟠 Low", "#FF9800"
 
@@ -493,10 +512,13 @@ def response_profile() -> dict:
 def with_response_profile(base_settings: dict, response_mode: str, retrieval_overrides: dict = None) -> dict:
     profile = RESPONSE_PROFILES.get(response_mode, RESPONSE_PROFILES["balanced"])
     effective = dict(base_settings)
+    effective["compact_prompt"] = False
 
     if response_mode == "fast":
         effective["number_of_results"] = min(effective.get("number_of_results", 5), 4)
         effective["max_sources"] = min(effective.get("max_sources", 3), 3)
+        effective["compact_prompt"] = True
+        effective["include_operations_manual"] = False
     elif response_mode == "deep":
         effective["number_of_results"] = min(effective.get("number_of_results", 5) + 2, 10)
         effective["max_sources"] = min(effective.get("max_sources", 3) + 1, 6)
@@ -2713,6 +2735,27 @@ def filter_relevant_citations(citations: list, question: str,
 
 
 def build_query_prompt(question: str, mode: str, retrieval_settings: dict) -> str:
+    if retrieval_settings.get("compact_prompt"):
+        scope_line = (
+            "Use only retrieved Rulebook excerpts."
+            if mode == "rulebook"
+            else "Use only retrieved CBA / Operations excerpts, favoring CBA clauses."
+        )
+        return f"""You are an NBA rules and policy assistant.
+Question: {question}
+
+Instructions:
+1. {scope_line}
+2. Keep the answer concise and grounded.
+3. Use exactly these headings:
+   Answer:
+   Direct source support:
+   Careful inference (if any):
+4. If sources are insufficient, say what is missing.
+
+Answer:
+"""
+
     exact_clause_instruction = (
         "Prioritize exact clause language, definitions, and headings that reuse the user's terms."
         if retrieval_settings.get("exact_match_bias")
@@ -3120,6 +3163,17 @@ def query_app_mode(
             retrieval_settings=first_pass_settings,
         )
         status("ranking", f"{len(citations)} source matches")
+
+        if profile.get("single_pass_only"):
+            status("drafting", "Composing fast-path answer")
+            st.session_state.session_ids[mode] = new_session
+            for citation in citations:
+                citation["source_domain"] = mode
+
+            final_scope = new_session or session_scope
+            final_cache_key = _cache_key(question, mode, response_mode, retrieval_settings, final_scope)
+            _cache_set(mode, final_cache_key, response, citations)
+            return response, citations
 
         needs_followup = needs_reformulation(response, citations)
         first_pass_differs = (
@@ -3662,6 +3716,8 @@ def main():
     current_messages = get_messages(current_mode)
     assistant_history = [msg for msg in current_messages if msg.get("role") == "assistant"]
     runtime_config = get_mode_runtime_config(current_mode)
+    # Warm client initialization on page render to reduce first-query cold-start delay.
+    get_bedrock_client("bedrock-agent-runtime", runtime_config["region"])
     retrieval_settings = get_retrieval_settings(current_mode)
     theme = THEMES[current_mode]
     kb_id = runtime_config["kb_id"]
