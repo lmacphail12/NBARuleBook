@@ -3656,6 +3656,7 @@ def query_app_mode(
         is_opus_cba = mode == "cba" and "opus" in primary_model_arn.lower()
         simple_cba = mode == "cba" and is_simple_cba_question(question)
         low_latency_model_arn = runtime_config.get("low_latency_model_arn") or DEFAULT_MODEL_ARNS["rulebook"]
+        cba_deep_guardrails = is_opus_cba and response_mode == "deep"
         use_cba_fast_lane = (
             is_opus_cba
             and response_mode in ("fast", "balanced")
@@ -3663,6 +3664,12 @@ def query_app_mode(
             and low_latency_model_arn
             and low_latency_model_arn != primary_model_arn
         )
+        use_cba_deep_hybrid = (
+            cba_deep_guardrails
+            and low_latency_model_arn
+            and low_latency_model_arn != primary_model_arn
+        )
+        low_latency_triage = use_cba_fast_lane or use_cba_deep_hybrid
 
         if is_opus_cba and response_mode in ("fast", "balanced"):
             retrieval_settings = dict(retrieval_settings)
@@ -3676,6 +3683,14 @@ def query_app_mode(
             retrieval_settings["max_answer_tokens"] = min(
                 retrieval_settings.get("max_answer_tokens", cap_tokens),
                 cap_tokens,
+            )
+        elif cba_deep_guardrails:
+            retrieval_settings = dict(retrieval_settings)
+            retrieval_settings["number_of_results"] = min(retrieval_settings.get("number_of_results", 7), 6)
+            retrieval_settings["max_sources"] = min(retrieval_settings.get("max_sources", 4), 4)
+            retrieval_settings["max_answer_tokens"] = min(
+                retrieval_settings.get("max_answer_tokens", 900),
+                760,
             )
         stateless_mode = retrieval_settings.get("stateless_mode", False)
         cur_session = None if stateless_mode else st.session_state.session_ids.get(mode)
@@ -3701,8 +3716,22 @@ def query_app_mode(
             return response, citations
 
         first_pass_settings = progressive_first_pass_settings(retrieval_settings, response_mode)
-        first_pass_model_arn = low_latency_model_arn if use_cba_fast_lane else primary_model_arn
-        first_pass_label = "Fast CBA lane (Sonnet triage)" if use_cba_fast_lane else "Initial retrieval pass"
+        if use_cba_deep_hybrid:
+            first_pass_settings = dict(first_pass_settings)
+            first_pass_settings["number_of_results"] = min(first_pass_settings.get("number_of_results", 4), 4)
+            first_pass_settings["max_sources"] = min(first_pass_settings.get("max_sources", 3), 3)
+            first_pass_settings["max_answer_tokens"] = min(
+                first_pass_settings.get("max_answer_tokens", retrieval_settings.get("max_answer_tokens", 760)),
+                460,
+            )
+
+        first_pass_model_arn = low_latency_model_arn if low_latency_triage else primary_model_arn
+        if use_cba_fast_lane:
+            first_pass_label = "Fast CBA lane (Sonnet triage)"
+        elif use_cba_deep_hybrid:
+            first_pass_label = "Deep hybrid triage (Sonnet)"
+        else:
+            first_pass_label = "Initial retrieval pass"
         status("retrieving", first_pass_label)
         response, citations, new_session = query_knowledge_base(
             question,
@@ -3713,12 +3742,18 @@ def query_app_mode(
             region_name=runtime_config["region"],
             retrieval_settings=first_pass_settings,
         )
+        passes_run = 1
         status("ranking", f"{len(citations)} source matches")
         single_pass_override = False
-        fast_lane_satisfied = use_cba_fast_lane and not needs_reformulation(response, citations)
+        triage_satisfied = low_latency_triage and not needs_reformulation(response, citations)
 
-        if use_cba_fast_lane and not fast_lane_satisfied:
-            status("retrieving", "Escalating to Opus quality pass")
+        if low_latency_triage and not triage_satisfied:
+            escalate_label = (
+                "Escalating to Opus quality pass"
+                if use_cba_fast_lane
+                else "Escalating to Opus deep-quality pass"
+            )
+            status("retrieving", escalate_label)
             response, citations, new_session = query_knowledge_base(
                 question,
                 runtime_config["kb_id"],
@@ -3728,15 +3763,18 @@ def query_app_mode(
                 region_name=runtime_config["region"],
                 retrieval_settings=retrieval_settings,
             )
+            passes_run += 1
             status("ranking", f"{len(citations)} source matches")
             single_pass_override = True
-        elif fast_lane_satisfied:
+        elif triage_satisfied:
             single_pass_override = True
 
         if profile.get("single_pass_only") or single_pass_override:
             status("drafting", "Composing fast-path answer")
-            if not stateless_mode and not fast_lane_satisfied:
-                st.session_state.session_ids[mode] = new_session
+            if not stateless_mode:
+                # Avoid persisting a Sonnet-only session when primary lane is Opus.
+                if (not low_latency_triage) or (low_latency_triage and not triage_satisfied):
+                    st.session_state.session_ids[mode] = new_session
             for citation in citations:
                 citation["source_domain"] = mode
 
@@ -3759,7 +3797,7 @@ def query_app_mode(
             or first_pass_settings.get("max_sources") != retrieval_settings.get("max_sources")
         )
 
-        if needs_followup and first_pass_differs:
+        if needs_followup and first_pass_differs and (not cba_deep_guardrails or passes_run < 2):
             status("retrieving", "Escalating retrieval depth")
             deep_response, deep_citations, new_session = query_knowledge_base(
                 question,
@@ -3770,6 +3808,7 @@ def query_app_mode(
                 region_name=runtime_config["region"],
                 retrieval_settings=retrieval_settings,
             )
+            passes_run += 1
             if better_candidate(response, citations, deep_response, deep_citations):
                 response, citations = deep_response, deep_citations
             needs_followup = needs_reformulation(response, citations)
@@ -3784,6 +3823,11 @@ def query_app_mode(
             if citations:
                 allow_expanded_retry = False
 
+        # Deep CBA guardrails: max two expensive passes and manual fallback only when no citations.
+        if cba_deep_guardrails:
+            allow_expanded_retry = False
+            allow_manual_fallback = allow_manual_fallback and not citations and passes_run < 2
+
         # First-turn speed optimization: keep only on Fast mode.
         if is_cold_start and response_mode == "fast":
             allow_manual_fallback = False
@@ -3792,7 +3836,7 @@ def query_app_mode(
 
         expanded_question = question
         run_expanded = False
-        if allow_expanded_retry and needs_followup:
+        if allow_expanded_retry and needs_followup and (not cba_deep_guardrails or passes_run < 2):
             expanded_question = expand_query_for_retrieval(question, mode)
             run_expanded = expanded_question != question
 
