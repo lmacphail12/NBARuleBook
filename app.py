@@ -358,6 +358,18 @@ def init_session_state():
         for mode in MODE_KEYS:
             st.session_state.pending_prompts.setdefault(mode, None)
 
+    if "sample_question_by_mode" not in st.session_state:
+        st.session_state.sample_question_by_mode = {mode: None for mode in MODE_KEYS}
+    elif not isinstance(st.session_state.sample_question_by_mode, dict):
+        legacy_sample = st.session_state.sample_question_by_mode
+        st.session_state.sample_question_by_mode = {
+            mode: legacy_sample if mode == current_mode else None
+            for mode in MODE_KEYS
+        }
+    else:
+        for mode in MODE_KEYS:
+            st.session_state.sample_question_by_mode.setdefault(mode, None)
+
     if "pending_prompt_meta" not in st.session_state:
         st.session_state.pending_prompt_meta = {mode: None for mode in MODE_KEYS}
     elif not isinstance(st.session_state.pending_prompt_meta, dict):
@@ -3661,6 +3673,54 @@ def parse_quiz(text: str):
     return q if q["question"] and q["options"] and q["answer"] else None
 
 
+def generate_sample_question(mode: str, quiz_model_id: str, region_name: str) -> str:
+    runtime_client = get_bedrock_runtime_client(region_name)
+    examples = THEMES[mode].get("examples", [])
+    chips = QUICK_CHIPS.get(mode, [])
+    seed_lines = "\n".join(f"- {item}" for item in (examples[:4] + chips[:4]))
+
+    fallback = examples[0] if examples else "What is the governing NBA rule for this situation?"
+    if not runtime_client:
+        return fallback
+
+    prompt = f"""Create exactly ONE short user question for an NBA assistant.
+Mode: {THEMES[mode]["name"]}
+
+Reference styles:
+{seed_lines}
+
+Requirements:
+- Return one sentence only.
+- Make it concrete and practical.
+- End with a question mark.
+- No preamble, no bullets, no quotes.
+"""
+
+    try:
+        response = runtime_client.invoke_model(
+            modelId=quiz_model_id,
+            contentType="application/json",
+            accept="application/json",
+            body=json.dumps({
+                "anthropic_version": "bedrock-2023-05-31",
+                "max_tokens": 90,
+                "messages": [{"role": "user", "content": prompt}],
+            }),
+        )
+        result = json.loads(response["body"].read())
+        text = result.get("content", [{}])[0].get("text", "").strip()
+        line = (text.splitlines()[0] if text else fallback).strip()
+        line = re.sub(r'^(question:|sample question:)\s*', "", line, flags=re.IGNORECASE).strip()
+        line = line.strip('"\'`*•- ')
+        if not line:
+            line = fallback
+        if not line.endswith("?"):
+            line = line.rstrip(".") + "?"
+        return line
+    except Exception:
+        return fallback
+
+
 def render_quick_chips(mode: str):
     st.markdown('<div class="chip-intro">Tap a quick-start topic to jump into the corpus faster.</div>', unsafe_allow_html=True)
     chip_cols = st.columns(3)
@@ -3897,13 +3957,13 @@ def main():
             """,
             unsafe_allow_html=True,
         )
-        st.caption("Use the chips and starter prompts below to jump right in.")
+        st.caption("Use the sample-question generator below to jump right in.")
 
     render_system_shell(current_mode, active_response_mode, current_messages, assistant_history)
 
     pending_prompt = st.session_state.pending_prompts.get(current_mode)
     pending_meta = st.session_state.pending_prompt_meta.get(current_mode) or {}
-    if pending_prompt and pending_meta.get("origin") in {"quick_chip", "starter"}:
+    if pending_prompt and pending_meta.get("origin") in {"quick_chip", "starter", "sample_question"}:
         label = html.escape(pending_meta.get("label", "Quick query"))
         st.markdown(
             '<div class="pending-query-banner">'
@@ -3948,14 +4008,32 @@ def main():
     render_mobile_nav(current_mode)
 
     st.markdown('<div id="query-starters"></div>', unsafe_allow_html=True)
-    st.markdown("### ⚡ Query Starters")
-    render_quick_chips(current_mode)
-    starter_cols = st.columns(2)
-    for idx, ex in enumerate(theme["examples"]):
-        with starter_cols[idx % 2]:
-            if st.button(f"{theme['icon']} {ex}", key=f"starter_{current_mode}_{idx}", use_container_width=True):
-                queue_prompt(current_mode, starter_prompt_for(current_mode, ex), origin="starter", label=ex)
+    st.markdown("### ⚡ Sample Question")
+    sample_cols = st.columns([0.34, 0.66], gap="small")
+    with sample_cols[0]:
+        if st.button("Generate sample question", key=f"sample_gen_{current_mode}", use_container_width=True):
+            with st.spinner("Generating sample question…"):
+                sample_question = generate_sample_question(
+                    current_mode,
+                    quiz_model_id,
+                    runtime_config["region"],
+                )
+            st.session_state.sample_question_by_mode[current_mode] = sample_question
+            st.rerun()
+    with sample_cols[1]:
+        sample_question = st.session_state.sample_question_by_mode.get(current_mode)
+        if sample_question:
+            st.markdown(f"**{html_safe(sample_question)}**", unsafe_allow_html=True)
+            if st.button("Ask this sample question", key=f"sample_ask_{current_mode}", use_container_width=True):
+                queue_prompt(
+                    current_mode,
+                    sample_question,
+                    origin="sample_question",
+                    label=sample_question[:80],
+                )
                 st.rerun()
+        else:
+            st.caption("Generate a model-created starter question based on this mode.")
     st.markdown("---")
 
     # ──────────────────────────────────────────
