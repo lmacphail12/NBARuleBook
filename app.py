@@ -299,7 +299,7 @@ def _default_retrieval_settings():
 
 def init_session_state():
     defaults = {
-        "mode": "rulebook",
+        "mode": "cba",
         "dark_mode": False,
         "response_mode": "balanced",
         "session_ids": {
@@ -1871,13 +1871,22 @@ div[data-testid="stExpander"] summary {{
 
 div[data-testid="stChatInput"] {{
     background: var(--paper) !important;
-    border: 1px solid var(--line) !important;
+    border: 2px solid {p}99 !important;
     border-radius: 18px !important;
-    box-shadow: none !important;
+    box-shadow: 0 0 0 1px {p}2E, 0 8px 20px var(--shadow) !important;
+    transition: border-color 0.16s ease, box-shadow 0.16s ease !important;
+}}
+div[data-testid="stChatInput"]:hover {{
+    border-color: {p}CC !important;
+}}
+div[data-testid="stChatInput"]:focus-within {{
+    border-color: {p} !important;
+    box-shadow: 0 0 0 3px {p}30, 0 12px 24px var(--shadow) !important;
 }}
 div[data-testid="stChatInput"] > div {{
     background: var(--paper) !important;
     border-radius: 18px !important;
+    border: 1px solid {p}55 !important;
 }}
 .stChatFloatingInputContainer,
 [data-testid="stChatInputContainer"],
