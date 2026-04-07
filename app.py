@@ -95,12 +95,12 @@ RETRIEVAL_DEFAULTS = {
 RESPONSE_PROFILES = {
     "fast": {
         "label": "Fast",
-        "description": "Lowest latency. May miss edge-case clauses.",
-        "progressive_first_results": 2,
-        "progressive_first_sources": 1,
-        "allow_expanded_retry": False,
+        "description": "Low latency with light fallback for better coverage.",
+        "progressive_first_results": 3,
+        "progressive_first_sources": 2,
+        "allow_expanded_retry": True,
         "allow_manual_fallback": False,
-        "single_pass_only": True,
+        "single_pass_only": False,
         "enforce_strict_grounding": False,
     },
     "balanced": {
@@ -320,7 +320,7 @@ def init_session_state():
     defaults = {
         "mode": "cba",
         "dark_mode": False,
-        "response_mode": "balanced",
+        "response_mode": "fast",
         "session_ids": {
             **{mode: None for mode in MODE_KEYS},
             **{key: None for key in DUAL_MODE_SESSION_KEYS},
@@ -517,12 +517,11 @@ def with_response_profile(base_settings: dict, response_mode: str, retrieval_ove
     effective["max_answer_tokens"] = 700
 
     if response_mode == "fast":
-        effective["number_of_results"] = min(effective.get("number_of_results", 5), 2)
-        effective["max_sources"] = min(effective.get("max_sources", 3), 2)
-        effective["compact_prompt"] = True
-        effective["include_operations_manual"] = False
-        effective["stateless_mode"] = True
-        effective["max_answer_tokens"] = 320
+        effective["number_of_results"] = min(effective.get("number_of_results", 5), 3)
+        effective["max_sources"] = min(effective.get("max_sources", 3), 3)
+        effective["compact_prompt"] = False
+        effective["stateless_mode"] = False
+        effective["max_answer_tokens"] = 520
         effective["exact_match_bias"] = True
     elif response_mode == "deep":
         effective["number_of_results"] = min(effective.get("number_of_results", 5) + 2, 10)
@@ -3249,8 +3248,8 @@ def query_app_mode(
         allow_expanded_retry = profile.get("allow_expanded_retry", True)
         allow_manual_fallback = profile.get("allow_manual_fallback", True) and should_run_manual_fallback(response, citations)
 
-        # First-turn speed optimization: avoid the slowest fallback path on cold start in Fast/Balanced.
-        if is_cold_start and response_mode in ("fast", "balanced"):
+        # First-turn speed optimization: keep only on Fast mode.
+        if is_cold_start and response_mode == "fast":
             allow_manual_fallback = False
             if citations:
                 allow_expanded_retry = False
