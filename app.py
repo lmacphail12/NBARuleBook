@@ -320,7 +320,7 @@ def init_session_state():
     defaults = {
         "mode": "cba",
         "dark_mode": False,
-        "response_mode": "fast",
+        "response_mode": "balanced",
         "session_ids": {
             **{mode: None for mode in MODE_KEYS},
             **{key: None for key in DUAL_MODE_SESSION_KEYS},
