@@ -193,6 +193,44 @@ STARTER_PROMPTS = {
         "Luxury tax": "How does the NBA luxury tax work under the CBA? Explain the threshold concept, repeater treatment, and practical team-building effects with citations.",
     },
 }
+EASY_SAMPLE_QUESTIONS = {
+    "rulebook": [
+        "What is a traveling violation under the NBA rulebook?",
+        "When does the NBA shot clock reset to 14 seconds?",
+        "What is the difference between a foul and a violation?",
+        "What are the criteria for a clear path foul?",
+        "When can officials use instant replay in the NBA?",
+    ],
+    "cba": [
+        "What is a restricted free agent under the NBA CBA?",
+        "What is the first apron in the NBA CBA?",
+        "How do two-way contracts work under the NBA CBA?",
+        "How do waiver claims work under NBA roster rules?",
+        "What is the luxury tax repeater rule?",
+    ],
+    "both": [
+        "Where does the NBA rulebook define an ejection, and where are discipline consequences covered in CBA sources?",
+        "How do technical fouls in the rulebook connect to suspension language in CBA sources?",
+    ],
+}
+COMPLEX_SAMPLE_THEMES = {
+    "rulebook": [
+        "clear path foul criteria, penalties, and replay review standard",
+        "goaltending versus basket interference distinctions and scoring treatment",
+        "away-from-play foul and take-foul penalty administration timing",
+        "shot clock reset exceptions after loose-ball and team control events",
+    ],
+    "cba": [
+        "first apron and second apron transaction restrictions in trades and free agency",
+        "trade matching rules, aggregation limits, and traded player exception usage",
+        "restricted free agency qualifying offer, offer sheet, and matching mechanics",
+        "luxury tax and repeater tax thresholds with roster-building consequences",
+    ],
+    "both": [
+        "technical foul accumulation, ejection procedure, and downstream suspension discipline",
+        "waiver process and roster effects across gameplay administration and CBA operations",
+    ],
+}
 RETRIEVAL_EXPANSIONS = {
     "rulebook": {
         "difference between a foul and a violation": "foul definition violation definition personal foul technical foul violation rule definitions distinction rule 10 rule 12",
@@ -214,6 +252,16 @@ DOC_BROWSE_PRESETS = {
     "rulebook": ["Rule 4", "Rule 10", "Rule 11", "Rule 12", "Instant Replay", "Officials"],
     "both": ["Suspensions", "Waivers", "Discipline", "Roster limits", "Two-way rules", "Replay consequences"],
     "cba": ["Article II", "Article VI", "Article VII", "Waivers", "Luxury tax", "Two-way contracts"],
+}
+QUERY_STOPWORDS = {
+    "a", "an", "the", "and", "or", "to", "of", "for", "in", "on", "with", "at", "by",
+    "from", "about", "is", "are", "was", "were", "be", "being", "been", "do", "does",
+    "did", "can", "could", "would", "should", "how", "what", "when", "where", "why",
+    "which", "who", "whom", "this", "that", "these", "those", "under", "into", "as",
+}
+CONTEXTUAL_QUERY_TERMS = {
+    "this", "that", "those", "these", "it", "its", "they", "them", "same", "earlier",
+    "previous", "above", "below", "again", "follow-up", "followup",
 }
 
 # ─────────────────────────────────────────────
@@ -370,6 +418,18 @@ def init_session_state():
         for mode in MODE_KEYS:
             st.session_state.sample_question_by_mode.setdefault(mode, None)
 
+    if "sample_question_meta_by_mode" not in st.session_state:
+        st.session_state.sample_question_meta_by_mode = {mode: None for mode in MODE_KEYS}
+    elif not isinstance(st.session_state.sample_question_meta_by_mode, dict):
+        legacy_meta = st.session_state.sample_question_meta_by_mode
+        st.session_state.sample_question_meta_by_mode = {
+            mode: legacy_meta if mode == current_mode else None
+            for mode in MODE_KEYS
+        }
+    else:
+        for mode in MODE_KEYS:
+            st.session_state.sample_question_meta_by_mode.setdefault(mode, None)
+
     if "pending_prompt_meta" not in st.session_state:
         st.session_state.pending_prompt_meta = {mode: None for mode in MODE_KEYS}
     elif not isinstance(st.session_state.pending_prompt_meta, dict):
@@ -417,6 +477,12 @@ def init_session_state():
     else:
         for mode in MODE_KEYS:
             st.session_state.feedback_by_mode.setdefault(mode, {})
+
+    if "helpful_questions_by_mode" not in st.session_state:
+        st.session_state.helpful_questions_by_mode = {mode: [] for mode in MODE_KEYS}
+    else:
+        for mode in MODE_KEYS:
+            st.session_state.helpful_questions_by_mode.setdefault(mode, [])
 
     if "response_cache_by_mode" not in st.session_state:
         st.session_state.response_cache_by_mode = {mode: {} for mode in MODE_KEYS}
@@ -489,6 +555,7 @@ def clear_mode_state(mode: str):
     st.session_state.quiz_asked[mode] = {}
     st.session_state.bookmarks_by_mode[mode] = []
     st.session_state.feedback_by_mode[mode] = {}
+    st.session_state.helpful_questions_by_mode[mode] = []
     st.session_state.response_cache_by_mode[mode] = {}
     reset_quiz_state(mode)
     if mode == "both":
@@ -503,6 +570,57 @@ def make_message_id() -> str:
 
 def get_message_id(msg: dict) -> str:
     return msg.get("id") or f"legacy-{msg.get('timestamp', 'no-ts')}-{abs(hash(msg.get('content', '')))}"
+
+
+def normalize_query_text(text: str) -> str:
+    lowered = (text or "").strip().lower()
+    lowered = re.sub(r"\s+", " ", lowered)
+    lowered = re.sub(r"[^\w\s]", " ", lowered)
+    lowered = re.sub(r"\s+", " ", lowered).strip()
+    return lowered
+
+
+def query_tokens(text: str) -> set:
+    normalized = normalize_query_text(text)
+    return {
+        token
+        for token in normalized.split()
+        if token and token not in QUERY_STOPWORDS and len(token) > 1
+    }
+
+
+def has_contextual_reference(text: str) -> bool:
+    normalized = normalize_query_text(text)
+    tokens = set(normalized.split())
+    return any(term in tokens for term in CONTEXTUAL_QUERY_TERMS)
+
+
+def retrieval_signature(response_mode: str, retrieval_settings: dict) -> str:
+    payload = {
+        "response_mode": response_mode,
+        "strict": retrieval_settings.get("strict_grounding"),
+        "exact": retrieval_settings.get("exact_match_bias"),
+        "search_type": retrieval_settings.get("search_type"),
+        "metadata_filter": retrieval_settings.get("metadata_filter"),
+        "reranker_model_arn": retrieval_settings.get("reranker_model_arn"),
+        "reranker_results": retrieval_settings.get("reranker_results"),
+    }
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+def query_similarity_score(question_a: str, question_b: str) -> float:
+    tokens_a = query_tokens(question_a)
+    tokens_b = query_tokens(question_b)
+    if not tokens_a or not tokens_b:
+        return 0.0
+
+    intersection = tokens_a & tokens_b
+    if not intersection:
+        return 0.0
+
+    jaccard = len(intersection) / max(1, len(tokens_a | tokens_b))
+    containment = len(intersection) / max(1, min(len(tokens_a), len(tokens_b)))
+    return (0.65 * jaccard) + (0.35 * containment)
 
 
 def queue_prompt(
@@ -605,13 +723,75 @@ def _cache_get(mode: str, cache_key: str):
     return entry.get("response"), entry.get("citations", [])
 
 
-def _cache_set(mode: str, cache_key: str, response: str, citations: list):
+def _cache_get_similar(
+    mode: str,
+    question: str,
+    response_mode: str,
+    retrieval_settings: dict,
+    min_score: float = 0.86,
+):
+    if has_contextual_reference(question):
+        return None
+
+    target_signature = retrieval_signature(response_mode, retrieval_settings)
+    target_normalized = normalize_query_text(question)
+    helpful_norms = {
+        normalize_query_text(item.get("question", ""))
+        for item in st.session_state.helpful_questions_by_mode.get(mode, [])
+        if isinstance(item, dict) and item.get("question")
+    }
+
+    best = None
+    best_score = min_score
+    for entry in _cache_store(mode).values():
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("settings_signature") != target_signature:
+            continue
+        candidate_question = entry.get("question", "")
+        if not candidate_question or has_contextual_reference(candidate_question):
+            continue
+        if not entry.get("citations"):
+            continue
+
+        candidate_normalized = normalize_query_text(candidate_question)
+        if not candidate_normalized or candidate_normalized == target_normalized:
+            continue
+
+        score = query_similarity_score(question, candidate_question)
+        if candidate_normalized in helpful_norms:
+            score += 0.03
+
+        if score > best_score:
+            best_score = score
+            best = entry
+
+    if not best:
+        return None
+    return best.get("response"), best.get("citations", []), best.get("question", "")
+
+
+def _cache_set(
+    mode: str,
+    cache_key: str,
+    response: str,
+    citations: list,
+    question: str = "",
+    response_mode: str = "balanced",
+    retrieval_settings: dict = None,
+):
     if not response or response.lower().startswith("error querying knowledge base"):
         return
+    if needs_reformulation(response, citations):
+        return
+
+    retrieval_settings = retrieval_settings or {}
     store = _cache_store(mode)
     store[cache_key] = {
         "response": response,
         "citations": citations,
+        "question": question,
+        "settings_signature": retrieval_signature(response_mode, retrieval_settings),
         "created_at": time.time(),
     }
     if len(store) > 120:
@@ -636,11 +816,68 @@ def save_bookmark(mode: str, msg: dict):
     })
 
 
-def record_feedback(mode: str, message_id: str, label: str):
+def get_helpful_questions(mode: str = None):
+    mode = mode or st.session_state.mode
+    return st.session_state.helpful_questions_by_mode[mode]
+
+
+def save_helpful_question(mode: str, question: str, message_id: str = "", source: str = "feedback"):
+    normalized = normalize_query_text(question)
+    if not normalized:
+        return
+
+    helpful = get_helpful_questions(mode)
+    existing_idx = next(
+        (
+            idx
+            for idx, item in enumerate(helpful)
+            if normalize_query_text(item.get("question", "")) == normalized
+            or (message_id and item.get("message_id") == message_id)
+        ),
+        None,
+    )
+
+    payload = {
+        "question": question.strip(),
+        "normalized": normalized,
+        "message_id": message_id,
+        "source": source,
+        "timestamp": datetime.now().strftime("%b %d, %I:%M %p"),
+        "created_at": time.time(),
+    }
+
+    if existing_idx is not None:
+        helpful[existing_idx] = payload
+    else:
+        helpful.append(payload)
+
+    if len(helpful) > 120:
+        helpful.sort(key=lambda item: item.get("created_at", 0), reverse=True)
+        del helpful[120:]
+
+
+def remove_helpful_question(mode: str, message_id: str):
+    if not message_id:
+        return
+    helpful = get_helpful_questions(mode)
+    st.session_state.helpful_questions_by_mode[mode] = [
+        item for item in helpful if item.get("message_id") != message_id
+    ]
+
+
+def record_feedback(mode: str, message_id: str, label: str, msg: dict = None):
+    prior = get_feedback_store(mode).get(message_id, {})
     get_feedback_store(mode)[message_id] = {
         "label": label,
         "timestamp": datetime.now().strftime("%b %d, %I:%M %p"),
     }
+    question_text = (msg or {}).get("question", "").strip()
+    prior_label = (prior.get("label") or "").lower()
+    current_label = label.lower()
+    if current_label == "helpful" and question_text:
+        save_helpful_question(mode, question_text, message_id=message_id, source="feedback")
+    elif prior_label == "helpful" and current_label != "helpful":
+        remove_helpful_question(mode, message_id)
 
 
 def parse_answer_sections(text: str) -> dict:
@@ -2675,15 +2912,15 @@ def render_message_controls(msg: dict, mode: str, message_key: str):
             st.rerun()
     with utility_cols[1]:
         if st.button("Helpful", key=f"fb_good_{message_key}", use_container_width=True):
-            record_feedback(mode, message_key, "Helpful")
+            record_feedback(mode, message_key, "Helpful", msg=msg)
             st.rerun()
     with utility_cols[2]:
         if st.button("Unclear", key=f"fb_unclear_{message_key}", use_container_width=True):
-            record_feedback(mode, message_key, "Unclear")
+            record_feedback(mode, message_key, "Unclear", msg=msg)
             st.rerun()
     with utility_cols[3]:
         if st.button("Wrong citation", key=f"fb_citation_{message_key}", use_container_width=True):
-            record_feedback(mode, message_key, "Wrong citation")
+            record_feedback(mode, message_key, "Wrong citation", msg=msg)
             st.rerun()
 
     feedback = get_feedback_store(mode).get(message_key)
@@ -3402,6 +3639,14 @@ def query_app_mode(
             status("finalizing", "Loaded from cache")
             return response, citations
 
+        similar_cached = _cache_get_similar(mode, question, response_mode, retrieval_settings)
+        if similar_cached:
+            response, citations, matched_question = similar_cached
+            for citation in citations:
+                citation["source_domain"] = mode
+            status("finalizing", f"Loaded from similar prior question: {matched_question[:56]}")
+            return response, citations
+
         status("retrieving", "Initial retrieval pass")
         first_pass_settings = progressive_first_pass_settings(retrieval_settings, response_mode)
         response, citations, new_session = query_knowledge_base(
@@ -3424,7 +3669,15 @@ def query_app_mode(
 
             final_scope = new_session or session_scope
             final_cache_key = _cache_key(question, mode, response_mode, retrieval_settings, final_scope)
-            _cache_set(mode, final_cache_key, response, citations)
+            _cache_set(
+                mode,
+                final_cache_key,
+                response,
+                citations,
+                question=question,
+                response_mode=response_mode,
+                retrieval_settings=retrieval_settings,
+            )
             return response, citations
 
         needs_followup = needs_reformulation(response, citations)
@@ -3525,7 +3778,15 @@ def query_app_mode(
 
         final_scope = new_session or session_scope
         final_cache_key = _cache_key(question, mode, response_mode, retrieval_settings, final_scope)
-        _cache_set(mode, final_cache_key, response, citations)
+        _cache_set(
+            mode,
+            final_cache_key,
+            response,
+            citations,
+            question=question,
+            response_mode=response_mode,
+            retrieval_settings=retrieval_settings,
+        )
         return response, citations
 
     rulebook_config = get_mode_runtime_config("rulebook")
@@ -3538,6 +3799,12 @@ def query_app_mode(
     if cross_cached:
         cached_response, cached_citations = cross_cached
         status("finalizing", "Loaded crossbook answer from cache")
+        return cached_response, cached_citations
+
+    cross_similar = _cache_get_similar("both", question, response_mode, retrieval_settings)
+    if cross_similar:
+        cached_response, cached_citations, matched_question = cross_similar
+        status("finalizing", f"Loaded crossbook answer from similar prior question: {matched_question[:56]}")
         return cached_response, cached_citations
 
     status("retrieving", "Querying Rulebook and CBA in parallel")
@@ -3627,7 +3894,15 @@ def query_app_mode(
     merged_citations = rb_citations + cba_citations
     final_cross_scope = f"{rb_session or 'new'}:{cba_session or 'new'}"
     final_cross_key = _cache_key(question, "both", response_mode, retrieval_settings, final_cross_scope)
-    _cache_set("both", final_cross_key, combined, merged_citations)
+    _cache_set(
+        "both",
+        final_cross_key,
+        combined,
+        merged_citations,
+        question=question,
+        response_mode=response_mode,
+        retrieval_settings=retrieval_settings,
+    )
     return combined, merged_citations
 
 
@@ -3813,25 +4088,94 @@ def parse_quiz(text: str):
     return q if q["question"] and q["options"] and q["answer"] else None
 
 
-def generate_sample_question(mode: str, quiz_model_id: str, region_name: str) -> str:
-    runtime_client = get_bedrock_runtime_client(region_name)
-    examples = THEMES[mode].get("examples", [])
-    chips = QUICK_CHIPS.get(mode, [])
-    seed_lines = "\n".join(f"- {item}" for item in (examples[:4] + chips[:4]))
+def _clean_generated_question(text: str, fallback: str) -> str:
+    line = (text.splitlines()[0] if text else fallback).strip()
+    line = re.sub(r'^(question:|sample question:)\s*', "", line, flags=re.IGNORECASE).strip()
+    line = line.strip('"\'`*•- ')
+    if not line:
+        line = fallback
+    if not line.endswith("?"):
+        line = line.rstrip(".") + "?"
+    return line
 
-    fallback = examples[0] if examples else "What is the governing NBA rule for this situation?"
-    if not runtime_client:
+
+def _quick_sample_fallback(mode: str) -> str:
+    helpful_pool = [
+        item.get("question", "").strip()
+        for item in get_helpful_questions(mode)[-20:]
+        if isinstance(item, dict) and item.get("question")
+    ]
+    if helpful_pool:
+        # Favor recent user-approved prompts for faster, higher-confidence starters.
+        return _random.choice(helpful_pool)
+
+    candidates = EASY_SAMPLE_QUESTIONS.get(mode) or THEMES[mode].get("examples", [])
+    if candidates:
+        return _random.choice(candidates)
+    return "What is the governing NBA rule for this situation?"
+
+
+def _build_complex_sample_from_sources(mode: str, quiz_model_id: str, region_name: str, fallback: str) -> str:
+    if mode not in ("rulebook", "cba"):
         return fallback
 
-    prompt = f"""Create exactly ONE short user question for an NBA assistant.
-Mode: {THEMES[mode]["name"]}
+    rag_client = get_bedrock_client("bedrock-agent-runtime", region_name)
+    runtime_client = get_bedrock_runtime_client(region_name)
+    runtime_config = get_mode_runtime_config(mode)
+    kb_id = runtime_config.get("kb_id")
+    if not rag_client or not runtime_client or not kb_id:
+        return fallback
 
-Reference styles:
-{seed_lines}
+    theme_hint = _random.choice(COMPLEX_SAMPLE_THEMES.get(mode) or [fallback])
+
+    try:
+        retrieval_resp = rag_client.retrieve(
+            knowledgeBaseId=kb_id,
+            retrievalQuery={"text": theme_hint},
+            retrievalConfiguration={"vectorSearchConfiguration": {"numberOfResults": 8}},
+        )
+    except Exception:
+        return fallback
+
+    excerpts = []
+    seen = set()
+    for result in retrieval_resp.get("retrievalResults", []):
+        chunk_text = result.get("content", {}).get("text", "").strip()
+        if not chunk_text:
+            continue
+        fingerprint = chunk_text[:180]
+        if fingerprint in seen:
+            continue
+        seen.add(fingerprint)
+
+        metadata = result.get("metadata", {})
+        location_parts = [
+            f"{label.title()} {metadata[label]}"
+            for label in ["rule", "section", "article", "part", "page"]
+            if label in metadata
+        ]
+        prefix = f"[{' | '.join(location_parts)}] " if location_parts else ""
+        excerpts.append(f"{prefix}{chunk_text[:620]}")
+        if len(excerpts) >= 5:
+            break
+
+    if len(excerpts) < 2:
+        return fallback
+
+    source_text = "\n\n".join(f"Excerpt {idx + 1}: {chunk}" for idx, chunk in enumerate(excerpts[:4]))
+    prompt = f"""Create exactly ONE advanced user question for an NBA assistant.
+Mode: {THEMES[mode]["name"]}
+Theme hint: {theme_hint}
+
+Use ONLY the excerpts below. Do not ask about anything that is not present in these excerpts.
+The question should require synthesis (2+ details), but still be answerable directly from the excerpts.
+Include exact terminology from the excerpts when possible.
+
+SOURCE EXCERPTS:
+{source_text}
 
 Requirements:
 - Return one sentence only.
-- Make it concrete and practical.
 - End with a question mark.
 - No preamble, no bullets, no quotes.
 """
@@ -3843,22 +4187,22 @@ Requirements:
             accept="application/json",
             body=json.dumps({
                 "anthropic_version": "bedrock-2023-05-31",
-                "max_tokens": 90,
+                "max_tokens": 130,
                 "messages": [{"role": "user", "content": prompt}],
             }),
         )
         result = json.loads(response["body"].read())
         text = result.get("content", [{}])[0].get("text", "").strip()
-        line = (text.splitlines()[0] if text else fallback).strip()
-        line = re.sub(r'^(question:|sample question:)\s*', "", line, flags=re.IGNORECASE).strip()
-        line = line.strip('"\'`*•- ')
-        if not line:
-            line = fallback
-        if not line.endswith("?"):
-            line = line.rstrip(".") + "?"
-        return line
+        return _clean_generated_question(text, fallback)
     except Exception:
         return fallback
+
+
+def generate_sample_question(mode: str, quiz_model_id: str, region_name: str, complexity: str = "quick") -> str:
+    fallback = _quick_sample_fallback(mode)
+    if complexity == "complex":
+        return _build_complex_sample_from_sources(mode, quiz_model_id, region_name, fallback)
+    return fallback
 
 
 def render_quick_chips(mode: str):
@@ -4154,20 +4498,40 @@ def main():
 
     st.markdown('<div id="query-starters"></div>', unsafe_allow_html=True)
     st.markdown("### ⚡ Sample Question")
+    st.caption("Quick samples are tuned for fast retrieval. Complex samples are generated from retrieved excerpts to stay source-grounded.")
     sample_cols = st.columns([0.34, 0.66], gap="small")
     with sample_cols[0]:
-        if st.button("Generate sample question", key=f"sample_gen_{current_mode}", use_container_width=True):
+        if st.button("Generate quick sample", key=f"sample_gen_quick_{current_mode}", use_container_width=True):
+            sample_question = generate_sample_question(
+                current_mode,
+                quiz_model_id,
+                runtime_config["region"],
+                complexity="quick",
+            )
+            st.session_state.sample_question_by_mode[current_mode] = sample_question
+            st.session_state.sample_question_meta_by_mode[current_mode] = {"complexity": "quick"}
+            st.rerun()
+
+        if st.button("Generate complex sample", key=f"sample_gen_complex_{current_mode}", use_container_width=True):
             with st.spinner("Generating sample question…"):
                 sample_question = generate_sample_question(
                     current_mode,
                     quiz_model_id,
                     runtime_config["region"],
+                    complexity="complex",
                 )
             st.session_state.sample_question_by_mode[current_mode] = sample_question
+            st.session_state.sample_question_meta_by_mode[current_mode] = {"complexity": "complex"}
             st.rerun()
     with sample_cols[1]:
         sample_question = st.session_state.sample_question_by_mode.get(current_mode)
+        sample_meta = st.session_state.sample_question_meta_by_mode.get(current_mode) or {}
         if sample_question:
+            complexity = sample_meta.get("complexity", "quick")
+            if complexity == "complex":
+                st.caption("Complex sample · grounded to retrieved source excerpts")
+            else:
+                st.caption("Quick sample · designed for fast, reliable retrieval")
             st.markdown(f"**{html_safe(sample_question)}**", unsafe_allow_html=True)
             if st.button("Ask this sample question", key=f"sample_ask_{current_mode}", use_container_width=True):
                 ts = datetime.now().strftime("%b %d, %I:%M %p")
@@ -4187,7 +4551,7 @@ def main():
                     already_logged_user_msg=True,
                 )
         else:
-            st.caption("Generate a model-created starter question based on this mode.")
+            st.caption("Generate an easy quick-hit question or a more complex source-grounded question.")
     st.markdown("---")
 
     # ──────────────────────────────────────────
