@@ -3056,6 +3056,19 @@ def combine_crossbook_answers(question: str, rulebook_text: str, cba_text: str) 
     )
 
 
+def should_run_manual_fallback(response: str, citations: list) -> bool:
+    if not citations:
+        return True
+    lower = (response or "").lower()
+    hard_failure_markers = (
+        "unable to assist",
+        "error querying knowledge base",
+        "aws error",
+        "retry failed",
+    )
+    return any(marker in lower for marker in hard_failure_markers)
+
+
 def query_app_mode(
     question: str,
     mode: str,
@@ -3082,6 +3095,9 @@ def query_app_mode(
 
     if mode in ("rulebook", "cba"):
         cur_session = st.session_state.session_ids.get(mode)
+        is_cold_start = cur_session is None and not any(
+            msg.get("role") == "assistant" for msg in get_messages(mode)
+        )
         session_scope = cur_session or "new"
         cache_key = _cache_key(question, mode, response_mode, retrieval_settings, session_scope)
         cached = _cache_get(mode, cache_key)
@@ -3127,36 +3143,67 @@ def query_app_mode(
             needs_followup = needs_reformulation(response, citations)
             status("ranking", f"{len(citations)} source matches")
 
-        if profile.get("allow_expanded_retry", True) and needs_followup:
-            expanded_question = expand_query_for_retrieval(question, mode)
-            if expanded_question != question:
-                status("retrieving", "Retrying with targeted terms")
-                retry_response, retry_citations, new_session = query_knowledge_base(
-                    expanded_question,
-                    runtime_config["kb_id"],
-                    runtime_config["model_arn"],
-                    mode,
-                    session_id=new_session,
-                    region_name=runtime_config["region"],
-                    retrieval_settings=retrieval_settings,
-                )
-                if better_candidate(response, citations, retry_response, retry_citations):
-                    response, citations = retry_response, retry_citations
-                needs_followup = needs_reformulation(response, citations)
-                status("ranking", f"{len(citations)} source matches")
+        allow_expanded_retry = profile.get("allow_expanded_retry", True)
+        allow_manual_fallback = profile.get("allow_manual_fallback", True) and should_run_manual_fallback(response, citations)
 
-        if profile.get("allow_manual_fallback", True) and needs_followup:
-            status("retrieving", "Deep fallback retrieval")
-            manual_response, manual_citations = manual_retrieve_and_answer(
-                question,
-                runtime_config["kb_id"],
-                runtime_config["model_arn"],
-                mode,
-                runtime_config["region"],
-                retrieval_settings,
-            )
-            if better_candidate(response, citations, manual_response, manual_citations):
-                response, citations = manual_response, manual_citations
+        # First-turn speed optimization: avoid the slowest fallback path on cold start in Fast/Balanced.
+        if is_cold_start and response_mode in ("fast", "balanced"):
+            allow_manual_fallback = False
+            if citations:
+                allow_expanded_retry = False
+
+        expanded_question = question
+        run_expanded = False
+        if allow_expanded_retry and needs_followup:
+            expanded_question = expand_query_for_retrieval(question, mode)
+            run_expanded = expanded_question != question
+
+        run_manual = allow_manual_fallback and needs_followup
+
+        if run_expanded or run_manual:
+            status("retrieving", "Running fallback retrieval")
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                retry_future = (
+                    pool.submit(
+                        query_knowledge_base,
+                        expanded_question,
+                        runtime_config["kb_id"],
+                        runtime_config["model_arn"],
+                        mode,
+                        new_session,
+                        runtime_config["region"],
+                        retrieval_settings,
+                    )
+                    if run_expanded
+                    else None
+                )
+                manual_future = (
+                    pool.submit(
+                        manual_retrieve_and_answer,
+                        question,
+                        runtime_config["kb_id"],
+                        runtime_config["model_arn"],
+                        mode,
+                        runtime_config["region"],
+                        retrieval_settings,
+                    )
+                    if run_manual
+                    else None
+                )
+
+                if retry_future:
+                    retry_response, retry_citations, retry_session = retry_future.result()
+                    new_session = retry_session
+                    if better_candidate(response, citations, retry_response, retry_citations):
+                        response, citations = retry_response, retry_citations
+
+                if manual_future:
+                    manual_response, manual_citations = manual_future.result()
+                    if better_candidate(response, citations, manual_response, manual_citations):
+                        response, citations = manual_response, manual_citations
+
+            needs_followup = needs_reformulation(response, citations)
+            status("ranking", f"{len(citations)} source matches")
 
         status("drafting", "Composing grounded answer")
         st.session_state.session_ids[mode] = new_session
