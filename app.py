@@ -82,7 +82,7 @@ MODE_KEYS = tuple(THEMES.keys())
 DUAL_MODE_SESSION_KEYS = ("both_rulebook", "both_cba")
 DEFAULT_MODEL_ARNS = {
     "rulebook": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
-    "cba": "us.anthropic.claude-opus-4-20250514-v1:0",
+    "cba": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
 }
 DEFAULT_QUIZ_MODEL_ID = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 RETRIEVAL_DEFAULTS = {
@@ -96,8 +96,8 @@ RESPONSE_PROFILES = {
     "fast": {
         "label": "Fast",
         "description": "Lowest latency. May miss edge-case clauses.",
-        "progressive_first_results": 3,
-        "progressive_first_sources": 2,
+        "progressive_first_results": 2,
+        "progressive_first_sources": 1,
         "allow_expanded_retry": False,
         "allow_manual_fallback": False,
         "single_pass_only": True,
@@ -513,16 +513,24 @@ def with_response_profile(base_settings: dict, response_mode: str, retrieval_ove
     profile = RESPONSE_PROFILES.get(response_mode, RESPONSE_PROFILES["balanced"])
     effective = dict(base_settings)
     effective["compact_prompt"] = False
+    effective["stateless_mode"] = False
+    effective["max_answer_tokens"] = 700
 
     if response_mode == "fast":
-        effective["number_of_results"] = min(effective.get("number_of_results", 5), 4)
-        effective["max_sources"] = min(effective.get("max_sources", 3), 3)
+        effective["number_of_results"] = min(effective.get("number_of_results", 5), 2)
+        effective["max_sources"] = min(effective.get("max_sources", 3), 2)
         effective["compact_prompt"] = True
         effective["include_operations_manual"] = False
+        effective["stateless_mode"] = True
+        effective["max_answer_tokens"] = 320
+        effective["exact_match_bias"] = True
     elif response_mode == "deep":
         effective["number_of_results"] = min(effective.get("number_of_results", 5) + 2, 10)
         effective["max_sources"] = min(effective.get("max_sources", 3) + 1, 6)
         effective["exact_match_bias"] = True
+        effective["max_answer_tokens"] = 900
+    else:
+        effective["max_answer_tokens"] = 640
 
     strict_override = profile.get("enforce_strict_grounding")
     if strict_override is not None:
@@ -2825,6 +2833,14 @@ def run_retrieve_and_generate(client, params: dict):
         ):
             params["retrieveAndGenerateConfiguration"]["knowledgeBaseConfiguration"].pop("retrievalConfiguration", None)
             return client.retrieve_and_generate(**params)
+        if (
+            "generationConfiguration" in message
+            or "inferenceConfig" in message
+            or "textInferenceConfig" in message
+            or "maxTokens" in message
+        ):
+            params["retrieveAndGenerateConfiguration"]["knowledgeBaseConfiguration"].pop("generationConfiguration", None)
+            return client.retrieve_and_generate(**params)
         raise
 
 
@@ -2837,7 +2853,8 @@ def query_knowledge_base(question: str, knowledge_base_id: str, model_arn: str,
         return "Error: Could not initialise Bedrock client.", [], None
 
     retrieval_settings = retrieval_settings or _default_retrieval_settings()
-    if session_id is None:
+    use_session = not retrieval_settings.get("stateless_mode", False)
+    if use_session and session_id is None:
         session_id = str(uuid.uuid4())
 
     prompt = build_query_prompt(question, mode, retrieval_settings)
@@ -2854,15 +2871,24 @@ def query_knowledge_base(question: str, knowledge_base_id: str, model_arn: str,
                         "numberOfResults": retrieval_settings.get("number_of_results", 5),
                     }
                 },
+                "generationConfiguration": {
+                    "inferenceConfig": {
+                        "textInferenceConfig": {
+                            "maxTokens": retrieval_settings.get("max_answer_tokens", 700),
+                            "temperature": 0.0,
+                            "topP": 0.9,
+                        }
+                    }
+                },
             },
         },
     }
-    if session_id:
+    if use_session and session_id:
         params["sessionId"] = session_id
 
     try:
         resp              = run_retrieve_and_generate(client, params)
-        new_session_id    = resp.get("sessionId", session_id)
+        new_session_id    = resp.get("sessionId", session_id) if use_session else None
         generated_text    = resp["output"]["text"]
         citations         = _extract_citations(resp)
         citations         = filter_relevant_citations(
@@ -2881,11 +2907,16 @@ def query_knowledge_base(question: str, knowledge_base_id: str, model_arn: str,
             "retrievalConfiguration" in message
             or "vectorSearchConfiguration" in message
             or "numberOfResults" in message
+            or "generationConfiguration" in message
+            or "inferenceConfig" in message
+            or "textInferenceConfig" in message
+            or "maxTokens" in message
         ):
             params["retrieveAndGenerateConfiguration"]["knowledgeBaseConfiguration"].pop("retrievalConfiguration", None)
+            params["retrieveAndGenerateConfiguration"]["knowledgeBaseConfiguration"].pop("generationConfiguration", None)
             try:
                 resp = run_retrieve_and_generate(client, params)
-                new_session_id = resp.get("sessionId", session_id)
+                new_session_id = resp.get("sessionId", session_id) if use_session else None
                 gen_text = resp["output"]["text"]
                 cits = filter_relevant_citations(
                     _extract_citations(resp),
@@ -2905,7 +2936,7 @@ def query_knowledge_base(question: str, knowledge_base_id: str, model_arn: str,
             params.pop("sessionId", None)
             try:
                 resp           = run_retrieve_and_generate(client, params)
-                new_session_id = resp.get("sessionId")
+                new_session_id = resp.get("sessionId") if use_session else None
                 gen_text       = resp["output"]["text"]
                 cits           = filter_relevant_citations(
                     _extract_citations(resp),
@@ -3137,11 +3168,12 @@ def query_app_mode(
         )
 
     if mode in ("rulebook", "cba"):
-        cur_session = st.session_state.session_ids.get(mode)
+        stateless_mode = retrieval_settings.get("stateless_mode", False)
+        cur_session = None if stateless_mode else st.session_state.session_ids.get(mode)
         is_cold_start = cur_session is None and not any(
             msg.get("role") == "assistant" for msg in get_messages(mode)
         )
-        session_scope = cur_session or "new"
+        session_scope = "stateless" if stateless_mode else (cur_session or "new")
         cache_key = _cache_key(question, mode, response_mode, retrieval_settings, session_scope)
         cached = _cache_get(mode, cache_key)
         if cached:
@@ -3166,7 +3198,8 @@ def query_app_mode(
 
         if profile.get("single_pass_only"):
             status("drafting", "Composing fast-path answer")
-            st.session_state.session_ids[mode] = new_session
+            if not stateless_mode:
+                st.session_state.session_ids[mode] = new_session
             for citation in citations:
                 citation["source_domain"] = mode
 
@@ -3260,7 +3293,8 @@ def query_app_mode(
             status("ranking", f"{len(citations)} source matches")
 
         status("drafting", "Composing grounded answer")
-        st.session_state.session_ids[mode] = new_session
+        if not stateless_mode:
+            st.session_state.session_ids[mode] = new_session
         for citation in citations:
             citation["source_domain"] = mode
 
