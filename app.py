@@ -512,12 +512,14 @@ def queue_prompt(
     origin: str = "generic",
     label: str = None,
     retrieval_overrides: dict = None,
+    already_logged_user_msg: bool = False,
 ):
     st.session_state.pending_prompts[mode] = prompt
     st.session_state.pending_prompt_meta[mode] = {
         "origin": origin,
         "label": label or prompt[:88],
         "retrieval_overrides": retrieval_overrides or {},
+        "already_logged_user_msg": bool(already_logged_user_msg),
     }
     st.session_state.queued_action[mode] = action_key
 
@@ -586,6 +588,10 @@ def _cache_key(question: str, mode: str, response_mode: str, retrieval_settings:
         "strict": retrieval_settings.get("strict_grounding"),
         "exact": retrieval_settings.get("exact_match_bias"),
         "ops": retrieval_settings.get("include_operations_manual"),
+        "search_type": retrieval_settings.get("search_type"),
+        "metadata_filter": retrieval_settings.get("metadata_filter"),
+        "reranker_model_arn": retrieval_settings.get("reranker_model_arn"),
+        "reranker_results": retrieval_settings.get("reranker_results"),
         "session_scope": session_scope,
     }
     serial = json.dumps(payload, sort_keys=True, separators=(",", ":"))
@@ -2289,6 +2295,29 @@ def _secret_value(key: str, default=None):
     return st.secrets[key] if key in st.secrets else default
 
 
+def _parse_json_object(value):
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None
+        try:
+            parsed = json.loads(raw)
+            return parsed if isinstance(parsed, dict) else None
+        except Exception:
+            return None
+    return None
+
+
+def _parse_positive_int(value, default=None):
+    try:
+        parsed = int(value)
+        return parsed if parsed > 0 else default
+    except Exception:
+        return default
+
+
 def get_aws_region():
     aws = _secret_section("aws")
     return (
@@ -2304,6 +2333,11 @@ def get_mode_runtime_config(mode: str) -> dict:
         return {
             "kb_id": "",
             "model_arn": DEFAULT_MODEL_ARNS["rulebook"],
+            "inference_profile_arn": None,
+            "search_type": None,
+            "metadata_filter": None,
+            "reranker_model_arn": None,
+            "reranker_results": None,
             "quiz_model_id": DEFAULT_QUIZ_MODEL_ID,
             "region": get_aws_region(),
         }
@@ -2311,9 +2345,55 @@ def get_mode_runtime_config(mode: str) -> dict:
     theme = THEMES[mode]
     knowledge_bases = _secret_section("knowledge_bases")
     models = _secret_section("models")
+    retrieval = _secret_section("retrieval")
     kb_secret_key = "knowledge_base_id" if mode == "rulebook" else "cba_knowledge_base_id"
     kb_env_key = "RULEBOOK_KB_ID" if mode == "rulebook" else "CBA_KB_ID"
     model_env_key = "RULEBOOK_MODEL_ARN" if mode == "rulebook" else "CBA_MODEL_ARN"
+    profile_env_key = "RULEBOOK_INFERENCE_PROFILE_ARN" if mode == "rulebook" else "CBA_INFERENCE_PROFILE_ARN"
+    search_env_key = "RULEBOOK_SEARCH_TYPE" if mode == "rulebook" else "CBA_SEARCH_TYPE"
+    filter_env_key = "RULEBOOK_METADATA_FILTER_JSON" if mode == "rulebook" else "CBA_METADATA_FILTER_JSON"
+    reranker_env_key = "RULEBOOK_RERANKER_MODEL_ARN" if mode == "rulebook" else "CBA_RERANKER_MODEL_ARN"
+    rerank_count_env_key = "RULEBOOK_RERANK_RESULTS" if mode == "rulebook" else "CBA_RERANK_RESULTS"
+
+    base_model_arn = (
+        _section_get(models, f"{mode}_model_arn")
+        or _secret_value(f"{mode}_model_arn")
+        or os.getenv(model_env_key)
+        or DEFAULT_MODEL_ARNS[mode]
+    )
+    inference_profile_arn = (
+        _section_get(models, f"{mode}_inference_profile_arn")
+        or _secret_value(f"{mode}_inference_profile_arn")
+        or os.getenv(profile_env_key)
+    )
+    search_type = (
+        _section_get(retrieval, f"{mode}_search_type")
+        or _secret_value(f"{mode}_search_type")
+        or os.getenv(search_env_key)
+    )
+    if isinstance(search_type, str):
+        search_type = search_type.strip().upper()
+    if search_type not in {"SEMANTIC", "HYBRID"}:
+        search_type = None
+
+    metadata_filter = _parse_json_object(
+        _section_get(retrieval, f"{mode}_metadata_filter")
+        or _section_get(retrieval, f"{mode}_metadata_filter_json")
+        or _secret_value(f"{mode}_metadata_filter")
+        or _secret_value(f"{mode}_metadata_filter_json")
+        or os.getenv(filter_env_key)
+    )
+    reranker_model_arn = (
+        _section_get(models, f"{mode}_reranker_model_arn")
+        or _secret_value(f"{mode}_reranker_model_arn")
+        or os.getenv(reranker_env_key)
+    )
+    reranker_results = _parse_positive_int(
+        _section_get(retrieval, f"{mode}_reranker_results")
+        or _secret_value(f"{mode}_reranker_results")
+        or os.getenv(rerank_count_env_key),
+        default=None,
+    )
 
     return {
         "kb_id": (
@@ -2322,12 +2402,12 @@ def get_mode_runtime_config(mode: str) -> dict:
             or os.getenv(kb_env_key)
             or theme["kb_id"]
         ),
-        "model_arn": (
-            _section_get(models, f"{mode}_model_arn")
-            or _secret_value(f"{mode}_model_arn")
-            or os.getenv(model_env_key)
-            or DEFAULT_MODEL_ARNS[mode]
-        ),
+        "model_arn": inference_profile_arn or base_model_arn,
+        "inference_profile_arn": inference_profile_arn,
+        "search_type": search_type,
+        "metadata_filter": metadata_filter,
+        "reranker_model_arn": reranker_model_arn,
+        "reranker_results": reranker_results,
         "quiz_model_id": (
             _section_get(models, "quiz_model_id")
             or _secret_value("quiz_model_id")
@@ -2863,11 +2943,28 @@ def run_retrieve_and_generate(client, params: dict):
             return response
         except ParamValidationError as e:
             message = str(e)
+            message_lower = message.lower()
             stripped = False
+            retrieval_cfg = kb_cfg.get("retrievalConfiguration", {})
+            vector_cfg = retrieval_cfg.get("vectorSearchConfiguration", {})
+
+            if "overrideSearchType" in message or "overridesearchtype" in message_lower:
+                if "overrideSearchType" in vector_cfg:
+                    vector_cfg.pop("overrideSearchType", None)
+                    stripped = True
+
+            if "filter" in message_lower:
+                if "filter" in vector_cfg:
+                    vector_cfg.pop("filter", None)
+                    stripped = True
+
+            if "rerankingconfiguration" in message_lower or "bedrockrerankingconfiguration" in message_lower:
+                if "rerankingConfiguration" in vector_cfg:
+                    vector_cfg.pop("rerankingConfiguration", None)
+                    stripped = True
 
             if (
                 "retrievalConfiguration" in message
-                or "vectorSearchConfiguration" in message
                 or "numberOfResults" in message
             ):
                 if "retrievalConfiguration" in kb_cfg:
@@ -2897,6 +2994,34 @@ def run_retrieve_and_generate(client, params: dict):
         raise last_error
 
 
+def build_vector_search_config(retrieval_settings: dict, number_of_results: int = None) -> dict:
+    results = number_of_results if number_of_results is not None else retrieval_settings.get("number_of_results", 5)
+    vector_cfg = {"numberOfResults": max(1, int(results))}
+
+    search_type = retrieval_settings.get("search_type")
+    if search_type in {"SEMANTIC", "HYBRID"}:
+        vector_cfg["overrideSearchType"] = search_type
+
+    metadata_filter = retrieval_settings.get("metadata_filter")
+    if isinstance(metadata_filter, dict) and metadata_filter:
+        vector_cfg["filter"] = metadata_filter
+
+    reranker_model_arn = retrieval_settings.get("reranker_model_arn")
+    if reranker_model_arn:
+        reranking_cfg = {
+            "type": "BEDROCK_RERANKING_MODEL",
+            "bedrockRerankingConfiguration": {
+                "modelConfiguration": {"modelArn": reranker_model_arn},
+            },
+        }
+        reranker_results = _parse_positive_int(retrieval_settings.get("reranker_results"), default=None)
+        if reranker_results:
+            reranking_cfg["bedrockRerankingConfiguration"]["numberOfRerankedResults"] = reranker_results
+        vector_cfg["rerankingConfiguration"] = reranking_cfg
+
+    return vector_cfg
+
+
 def query_knowledge_base(question: str, knowledge_base_id: str, model_arn: str,
                           mode: str = "rulebook", session_id: str = None,
                           region_name: str = None, retrieval_settings: dict = None):
@@ -2911,6 +3036,7 @@ def query_knowledge_base(question: str, knowledge_base_id: str, model_arn: str,
         session_id = str(uuid.uuid4())
 
     prompt = build_query_prompt(question, mode, retrieval_settings)
+    vector_search_cfg = build_vector_search_config(retrieval_settings)
 
     params = {
         "input": {"text": prompt},
@@ -2920,9 +3046,7 @@ def query_knowledge_base(question: str, knowledge_base_id: str, model_arn: str,
                 "knowledgeBaseId": knowledge_base_id,
                 "modelArn": model_arn,
                 "retrievalConfiguration": {
-                    "vectorSearchConfiguration": {
-                        "numberOfResults": retrieval_settings.get("number_of_results", 5),
-                    }
+                    "vectorSearchConfiguration": vector_search_cfg
                 },
                 "generationConfiguration": {
                     "inferenceConfig": {
@@ -2958,8 +3082,11 @@ def query_knowledge_base(question: str, knowledge_base_id: str, model_arn: str,
 
         if code == "ValidationException" and (
             "retrievalConfiguration" in message
-            or "vectorSearchConfiguration" in message
             or "numberOfResults" in message
+            or "overrideSearchType" in message
+            or "filter" in message.lower()
+            or "rerankingConfiguration" in message
+            or "bedrockRerankingConfiguration" in message
             or "generationConfiguration" in message
             or "inferenceConfig" in message
             or "textInferenceConfig" in message
@@ -2969,12 +3096,24 @@ def query_knowledge_base(question: str, knowledge_base_id: str, model_arn: str,
                 "bedrock_feature_support",
                 {"retrievalConfiguration": None, "generationConfiguration": None},
             )
+            kb_cfg = params["retrieveAndGenerateConfiguration"]["knowledgeBaseConfiguration"]
+            retrieval_cfg = kb_cfg.get("retrievalConfiguration", {})
+            vector_cfg = retrieval_cfg.get("vectorSearchConfiguration", {})
+            message_lower = message.lower()
+
             if (
                 "retrievalConfiguration" in message
-                or "vectorSearchConfiguration" in message
                 or "numberOfResults" in message
             ):
                 feature_support["retrievalConfiguration"] = False
+                kb_cfg.pop("retrievalConfiguration", None)
+            else:
+                if "overrideSearchType" in message or "overridesearchtype" in message_lower:
+                    vector_cfg.pop("overrideSearchType", None)
+                if "filter" in message_lower:
+                    vector_cfg.pop("filter", None)
+                if "rerankingConfiguration" in message or "bedrockRerankingConfiguration" in message:
+                    vector_cfg.pop("rerankingConfiguration", None)
             if (
                 "generationConfiguration" in message
                 or "inferenceConfig" in message
@@ -2982,9 +3121,8 @@ def query_knowledge_base(question: str, knowledge_base_id: str, model_arn: str,
                 or "maxTokens" in message
             ):
                 feature_support["generationConfiguration"] = False
+                kb_cfg.pop("generationConfiguration", None)
             st.session_state.bedrock_feature_support = feature_support
-            params["retrieveAndGenerateConfiguration"]["knowledgeBaseConfiguration"].pop("retrievalConfiguration", None)
-            params["retrieveAndGenerateConfiguration"]["knowledgeBaseConfiguration"].pop("generationConfiguration", None)
             try:
                 resp = run_retrieve_and_generate(client, params)
                 new_session_id = resp.get("sessionId", session_id) if use_session else None
@@ -3089,14 +3227,16 @@ def manual_retrieve_and_answer(question: str, knowledge_base_id: str, model_arn:
     raw_citations = []
     seen = set()
     for retrieval_query in build_manual_retrieval_queries(question, mode):
+        manual_vector_cfg = build_vector_search_config(
+            retrieval_settings,
+            number_of_results=max(retrieval_settings.get("number_of_results", 5), 4),
+        )
         try:
             retrieval_resp = rag_client.retrieve(
                 knowledgeBaseId=knowledge_base_id,
                 retrievalQuery={"text": retrieval_query},
                 retrievalConfiguration={
-                    "vectorSearchConfiguration": {
-                        "numberOfResults": max(retrieval_settings.get("number_of_results", 5), 4),
-                    }
+                    "vectorSearchConfiguration": manual_vector_cfg
                 },
             )
         except Exception:
@@ -3965,10 +4105,15 @@ def main():
     pending_meta = st.session_state.pending_prompt_meta.get(current_mode) or {}
     if pending_prompt and pending_meta.get("origin") in {"quick_chip", "starter", "sample_question"}:
         label = html.escape(pending_meta.get("label", "Quick query"))
+        pending_origin = pending_meta.get("origin")
+        if pending_origin == "sample_question":
+            pending_text = f'Asking sample question: <strong>{label}</strong>…'
+        else:
+            pending_text = f'Retrieving results for <strong>{label}</strong>…'
         st.markdown(
             '<div class="pending-query-banner">'
             '<span class="pending-query-dot"></span>'
-            f'<span class="pending-query-text">Retrieving results for <strong>{label}</strong>…</span>'
+            f'<span class="pending-query-text">{pending_text}</span>'
             "</div>",
             unsafe_allow_html=True,
         )
@@ -4025,13 +4170,22 @@ def main():
         if sample_question:
             st.markdown(f"**{html_safe(sample_question)}**", unsafe_allow_html=True)
             if st.button("Ask this sample question", key=f"sample_ask_{current_mode}", use_container_width=True):
+                ts = datetime.now().strftime("%b %d, %I:%M %p")
+                current_messages.append(
+                    {
+                        "id": make_message_id(),
+                        "role": "user",
+                        "content": sample_question,
+                        "timestamp": ts,
+                    }
+                )
                 queue_prompt(
                     current_mode,
                     sample_question,
                     origin="sample_question",
                     label=sample_question[:80],
+                    already_logged_user_msg=True,
                 )
-                st.rerun()
         else:
             st.caption("Generate a model-created starter question based on this mode.")
     st.markdown("---")
@@ -4192,9 +4346,11 @@ def main():
     pending_prompt = st.session_state.pending_prompts[current_mode]
     queued_action = None
     pending_meta_current = {}
+    already_logged_user_msg = False
     if not prompt and pending_prompt:
         prompt = pending_prompt
         pending_meta_current = st.session_state.pending_prompt_meta.get(current_mode) or {}
+        already_logged_user_msg = bool(pending_meta_current.get("already_logged_user_msg"))
         st.session_state.pending_prompts[current_mode] = None
         queued_action = st.session_state.queued_action[current_mode]
         st.session_state.queued_action[current_mode] = None
@@ -4203,12 +4359,13 @@ def main():
         st.session_state.pending_prompt_meta[current_mode] = None
 
     if prompt:
-        ts = datetime.now().strftime("%b %d, %I:%M %p")
-        current_messages.append({"id": make_message_id(), "role": "user", "content": prompt, "timestamp": ts})
+        if not already_logged_user_msg:
+            ts = datetime.now().strftime("%b %d, %I:%M %p")
+            current_messages.append({"id": make_message_id(), "role": "user", "content": prompt, "timestamp": ts})
 
-        with st.chat_message("user"):
-            st.markdown(safe_markdown(prompt))
-            st.markdown(f'<div class="msg-ts">🕐 {ts}</div>', unsafe_allow_html=True)
+            with st.chat_message("user"):
+                st.markdown(safe_markdown(prompt))
+                st.markdown(f'<div class="msg-ts">🕐 {ts}</div>', unsafe_allow_html=True)
 
         # ── Animated loading card inside the assistant bubble ────────────────────
         status_placeholder = st.empty()
@@ -4255,6 +4412,14 @@ def main():
                 active_response_mode,
                 retrieval_overrides=pending_meta_current.get("retrieval_overrides"),
             )
+            if runtime_config.get("search_type"):
+                request_settings["search_type"] = runtime_config["search_type"]
+            if isinstance(runtime_config.get("metadata_filter"), dict):
+                request_settings["metadata_filter"] = runtime_config["metadata_filter"]
+            if runtime_config.get("reranker_model_arn"):
+                request_settings["reranker_model_arn"] = runtime_config["reranker_model_arn"]
+            if runtime_config.get("reranker_results"):
+                request_settings["reranker_results"] = runtime_config["reranker_results"]
             def set_stage(stage: str, detail: str = ""):
                 status_timeline.markdown(build_status_timeline_html(stage, detail), unsafe_allow_html=True)
 
