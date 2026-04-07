@@ -82,7 +82,7 @@ MODE_KEYS = tuple(THEMES.keys())
 DUAL_MODE_SESSION_KEYS = ("both_rulebook", "both_cba")
 DEFAULT_MODEL_ARNS = {
     "rulebook": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
-    "cba": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+    "cba": "us.anthropic.claude-opus-4-20250514-v1:0",
 }
 DEFAULT_QUIZ_MODEL_ID = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 RETRIEVAL_DEFAULTS = {
@@ -425,6 +425,12 @@ def init_session_state():
     else:
         for mode in MODE_KEYS:
             st.session_state.queued_action.setdefault(mode, None)
+
+    if "bedrock_feature_support" not in st.session_state:
+        st.session_state.bedrock_feature_support = {
+            "retrievalConfiguration": None,
+            "generationConfiguration": None,
+        }
 
 
 def get_messages(mode: str = None):
@@ -2821,13 +2827,30 @@ Answer:
 
 def run_retrieve_and_generate(client, params: dict):
     """Call Bedrock retrieve_and_generate, progressively stripping unsupported fields."""
+    kb_cfg = params.get("retrieveAndGenerateConfiguration", {}).get("knowledgeBaseConfiguration", {})
+    feature_support = st.session_state.get(
+        "bedrock_feature_support",
+        {"retrievalConfiguration": None, "generationConfiguration": None},
+    )
+
+    # Skip fields already known to be unsupported in this runtime.
+    if feature_support.get("retrievalConfiguration") is False:
+        kb_cfg.pop("retrievalConfiguration", None)
+    if feature_support.get("generationConfiguration") is False:
+        kb_cfg.pop("generationConfiguration", None)
+
     last_error = None
     for _ in range(3):
         try:
-            return client.retrieve_and_generate(**params)
+            response = client.retrieve_and_generate(**params)
+            if feature_support.get("retrievalConfiguration") is None:
+                feature_support["retrievalConfiguration"] = "retrievalConfiguration" in kb_cfg
+            if feature_support.get("generationConfiguration") is None:
+                feature_support["generationConfiguration"] = "generationConfiguration" in kb_cfg
+            st.session_state.bedrock_feature_support = feature_support
+            return response
         except ParamValidationError as e:
             message = str(e)
-            kb_cfg = params.get("retrieveAndGenerateConfiguration", {}).get("knowledgeBaseConfiguration", {})
             stripped = False
 
             if (
@@ -2838,6 +2861,7 @@ def run_retrieve_and_generate(client, params: dict):
                 if "retrievalConfiguration" in kb_cfg:
                     kb_cfg.pop("retrievalConfiguration", None)
                     stripped = True
+                feature_support["retrievalConfiguration"] = False
 
             if (
                 "generationConfiguration" in message
@@ -2848,6 +2872,7 @@ def run_retrieve_and_generate(client, params: dict):
                 if "generationConfiguration" in kb_cfg:
                     kb_cfg.pop("generationConfiguration", None)
                     stripped = True
+                feature_support["generationConfiguration"] = False
 
             if not stripped:
                 raise
@@ -2855,6 +2880,7 @@ def run_retrieve_and_generate(client, params: dict):
             last_error = e
             continue
 
+    st.session_state.bedrock_feature_support = feature_support
     if last_error:
         raise last_error
 
@@ -2927,6 +2953,24 @@ def query_knowledge_base(question: str, knowledge_base_id: str, model_arn: str,
             or "textInferenceConfig" in message
             or "maxTokens" in message
         ):
+            feature_support = st.session_state.get(
+                "bedrock_feature_support",
+                {"retrievalConfiguration": None, "generationConfiguration": None},
+            )
+            if (
+                "retrievalConfiguration" in message
+                or "vectorSearchConfiguration" in message
+                or "numberOfResults" in message
+            ):
+                feature_support["retrievalConfiguration"] = False
+            if (
+                "generationConfiguration" in message
+                or "inferenceConfig" in message
+                or "textInferenceConfig" in message
+                or "maxTokens" in message
+            ):
+                feature_support["generationConfiguration"] = False
+            st.session_state.bedrock_feature_support = feature_support
             params["retrieveAndGenerateConfiguration"]["knowledgeBaseConfiguration"].pop("retrievalConfiguration", None)
             params["retrieveAndGenerateConfiguration"]["knowledgeBaseConfiguration"].pop("generationConfiguration", None)
             try:
@@ -3183,6 +3227,14 @@ def query_app_mode(
         )
 
     if mode in ("rulebook", "cba"):
+        is_opus_cba = mode == "cba" and "opus" in (runtime_config.get("model_arn", "").lower())
+        if is_opus_cba and response_mode in ("fast", "balanced"):
+            retrieval_settings = dict(retrieval_settings)
+            cap_tokens = 420 if response_mode == "fast" else 560
+            retrieval_settings["max_answer_tokens"] = min(
+                retrieval_settings.get("max_answer_tokens", cap_tokens),
+                cap_tokens,
+            )
         stateless_mode = retrieval_settings.get("stateless_mode", False)
         cur_session = None if stateless_mode else st.session_state.session_ids.get(mode)
         is_cold_start = cur_session is None and not any(
@@ -3247,6 +3299,12 @@ def query_app_mode(
 
         allow_expanded_retry = profile.get("allow_expanded_retry", True)
         allow_manual_fallback = profile.get("allow_manual_fallback", True) and should_run_manual_fallback(response, citations)
+
+        # Opus quality mode can be slow; keep it to one follow-up lane in Fast/Balanced.
+        if is_opus_cba and response_mode in ("fast", "balanced"):
+            allow_manual_fallback = False
+            if citations:
+                allow_expanded_retry = False
 
         # First-turn speed optimization: keep only on Fast mode.
         if is_cold_start and response_mode == "fast":
