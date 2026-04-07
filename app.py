@@ -1068,6 +1068,32 @@ def needs_reformulation(response: str, citations: list) -> bool:
     return (not citations) or any(marker in response.lower() for marker in unresolved_markers)
 
 
+def is_simple_cba_question(question: str) -> bool:
+    normalized = normalize_query_text(question)
+    if not normalized:
+        return False
+
+    complexity_markers = (
+        "compare ",
+        "difference between",
+        "versus",
+        "vs ",
+        "crossbook",
+        "walk through",
+        "step by step",
+        "hypothetical",
+        "edge case",
+        "interact",
+        "implication",
+        "sequence",
+    )
+    if any(marker in normalized for marker in complexity_markers):
+        return False
+
+    tokens = query_tokens(normalized)
+    return 2 <= len(tokens) <= 14
+
+
 def starter_prompt_for(mode: str, label: str) -> str:
     mapped = STARTER_PROMPTS.get(mode, {}).get(label)
     if mapped:
@@ -2570,6 +2596,7 @@ def get_mode_runtime_config(mode: str) -> dict:
         return {
             "kb_id": "",
             "model_arn": DEFAULT_MODEL_ARNS["rulebook"],
+            "low_latency_model_arn": None,
             "inference_profile_arn": None,
             "search_type": None,
             "metadata_filter": None,
@@ -2591,6 +2618,7 @@ def get_mode_runtime_config(mode: str) -> dict:
     filter_env_key = "RULEBOOK_METADATA_FILTER_JSON" if mode == "rulebook" else "CBA_METADATA_FILTER_JSON"
     reranker_env_key = "RULEBOOK_RERANKER_MODEL_ARN" if mode == "rulebook" else "CBA_RERANKER_MODEL_ARN"
     rerank_count_env_key = "RULEBOOK_RERANK_RESULTS" if mode == "rulebook" else "CBA_RERANK_RESULTS"
+    low_latency_model_env_key = "RULEBOOK_LOW_LATENCY_MODEL_ARN" if mode == "rulebook" else "CBA_LOW_LATENCY_MODEL_ARN"
 
     base_model_arn = (
         _section_get(models, f"{mode}_model_arn")
@@ -2631,6 +2659,13 @@ def get_mode_runtime_config(mode: str) -> dict:
         or os.getenv(rerank_count_env_key),
         default=None,
     )
+    low_latency_model_arn = (
+        _section_get(models, f"{mode}_low_latency_model_arn")
+        or _secret_value(f"{mode}_low_latency_model_arn")
+        or os.getenv(low_latency_model_env_key)
+    )
+    if mode == "cba" and not low_latency_model_arn:
+        low_latency_model_arn = DEFAULT_MODEL_ARNS["rulebook"]
 
     return {
         "kb_id": (
@@ -2640,6 +2675,7 @@ def get_mode_runtime_config(mode: str) -> dict:
             or theme["kb_id"]
         ),
         "model_arn": inference_profile_arn or base_model_arn,
+        "low_latency_model_arn": low_latency_model_arn,
         "inference_profile_arn": inference_profile_arn,
         "search_type": search_type,
         "metadata_filter": metadata_filter,
@@ -3616,10 +3652,27 @@ def query_app_mode(
         )
 
     if mode in ("rulebook", "cba"):
-        is_opus_cba = mode == "cba" and "opus" in (runtime_config.get("model_arn", "").lower())
+        primary_model_arn = runtime_config.get("model_arn", "")
+        is_opus_cba = mode == "cba" and "opus" in primary_model_arn.lower()
+        simple_cba = mode == "cba" and is_simple_cba_question(question)
+        low_latency_model_arn = runtime_config.get("low_latency_model_arn") or DEFAULT_MODEL_ARNS["rulebook"]
+        use_cba_fast_lane = (
+            is_opus_cba
+            and response_mode in ("fast", "balanced")
+            and simple_cba
+            and low_latency_model_arn
+            and low_latency_model_arn != primary_model_arn
+        )
+
         if is_opus_cba and response_mode in ("fast", "balanced"):
             retrieval_settings = dict(retrieval_settings)
             cap_tokens = 420 if response_mode == "fast" else 560
+            if use_cba_fast_lane:
+                cap_tokens = min(cap_tokens, 500)
+                retrieval_settings["number_of_results"] = min(retrieval_settings.get("number_of_results", 5), 4)
+                retrieval_settings["max_sources"] = min(retrieval_settings.get("max_sources", 3), 3)
+                retrieval_settings.pop("reranker_model_arn", None)
+                retrieval_settings.pop("reranker_results", None)
             retrieval_settings["max_answer_tokens"] = min(
                 retrieval_settings.get("max_answer_tokens", cap_tokens),
                 cap_tokens,
@@ -3647,22 +3700,42 @@ def query_app_mode(
             status("finalizing", f"Loaded from similar prior question: {matched_question[:56]}")
             return response, citations
 
-        status("retrieving", "Initial retrieval pass")
         first_pass_settings = progressive_first_pass_settings(retrieval_settings, response_mode)
+        first_pass_model_arn = low_latency_model_arn if use_cba_fast_lane else primary_model_arn
+        first_pass_label = "Fast CBA lane (Sonnet triage)" if use_cba_fast_lane else "Initial retrieval pass"
+        status("retrieving", first_pass_label)
         response, citations, new_session = query_knowledge_base(
             question,
             runtime_config["kb_id"],
-            runtime_config["model_arn"],
+            first_pass_model_arn,
             mode,
             session_id=cur_session,
             region_name=runtime_config["region"],
             retrieval_settings=first_pass_settings,
         )
         status("ranking", f"{len(citations)} source matches")
+        single_pass_override = False
+        fast_lane_satisfied = use_cba_fast_lane and not needs_reformulation(response, citations)
 
-        if profile.get("single_pass_only"):
+        if use_cba_fast_lane and not fast_lane_satisfied:
+            status("retrieving", "Escalating to Opus quality pass")
+            response, citations, new_session = query_knowledge_base(
+                question,
+                runtime_config["kb_id"],
+                primary_model_arn,
+                mode,
+                session_id=cur_session,
+                region_name=runtime_config["region"],
+                retrieval_settings=retrieval_settings,
+            )
+            status("ranking", f"{len(citations)} source matches")
+            single_pass_override = True
+        elif fast_lane_satisfied:
+            single_pass_override = True
+
+        if profile.get("single_pass_only") or single_pass_override:
             status("drafting", "Composing fast-path answer")
-            if not stateless_mode:
+            if not stateless_mode and not fast_lane_satisfied:
                 st.session_state.session_ids[mode] = new_session
             for citation in citations:
                 citation["source_domain"] = mode
@@ -3691,7 +3764,7 @@ def query_app_mode(
             deep_response, deep_citations, new_session = query_knowledge_base(
                 question,
                 runtime_config["kb_id"],
-                runtime_config["model_arn"],
+                primary_model_arn,
                 mode,
                 session_id=new_session,
                 region_name=runtime_config["region"],
@@ -3733,7 +3806,7 @@ def query_app_mode(
                         query_knowledge_base,
                         expanded_question,
                         runtime_config["kb_id"],
-                        runtime_config["model_arn"],
+                        primary_model_arn,
                         mode,
                         new_session,
                         runtime_config["region"],
@@ -3747,7 +3820,7 @@ def query_app_mode(
                         manual_retrieve_and_answer,
                         question,
                         runtime_config["kb_id"],
-                        runtime_config["model_arn"],
+                        primary_model_arn,
                         mode,
                         runtime_config["region"],
                         retrieval_settings,
