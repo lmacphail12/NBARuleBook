@@ -1095,22 +1095,31 @@ def enforce_three_bullet_response(text: str, citations: list, mode: str) -> str:
 def build_followup_prompt(action_key: str, msg: dict, mode: str) -> str:
     question = msg.get("question") or "the previous question"
     source_hint = "Use the same source type and keep citations grounded."
+
+    # Lead with the original question so the KB retrieval matches the right chunks.
+    # Transform instructions follow so the generation model formats the response accordingly.
     prompts = {
         "fan": (
-            f"Explain the answer to this question the way you'd explain it to a friend who watches basketball "
-            f"but has never read the CBA or rulebook: '{question}'. "
+            f"{question}\n\n"
+            f"RESPONSE FORMAT INSTRUCTION: Explain the answer to this question the way you'd explain it "
+            f"to a friend who watches basketball but has never read the CBA or rulebook. "
             f"Avoid jargon, legal phrasing, and article references. Use everyday words, "
-            f"comparisons to real game situations, and keep it short — like a text message explanation, not a report. {source_hint}"
+            f"comparisons to real game situations, and keep it short — like a text message explanation, "
+            f"not a report. {source_hint}"
         ),
         "hypothetical": (
-            f"For the earlier question '{question}', give me one realistic hypothetical example and walk through how the rule or CBA language applies. "
+            f"{question}\n\n"
+            f"RESPONSE FORMAT INSTRUCTION: Give one realistic hypothetical example for this topic "
+            f"and walk through how the rule or CBA language applies. "
             f"Label assumptions clearly. {source_hint}"
         ),
         "bullets": (
-            f"Give a concise bullet-point summary answering '{question}'. "
-            f"Each bullet should be an independent, self-contained takeaway — not a sentence copied from the earlier answer. "
-            f"Write each bullet as a short, direct statement that someone could read on its own and understand the key point. "
-            f"Use 3-5 bullets. No headers, no sub-bullets, no preamble. {source_hint}"
+            f"{question}\n\n"
+            f"RESPONSE FORMAT INSTRUCTION: Answer with a concise bullet-point summary only. "
+            f"Each bullet should be an independent, self-contained takeaway. "
+            f"Write each bullet as a short, direct statement a reader can understand on its own. "
+            f"Use 3-5 bullets. No headers, no sub-bullets, no preamble, no closing text. "
+            f"Start each bullet with '- '. {source_hint}"
         ),
     }
     return prompts[action_key]
@@ -3108,7 +3117,9 @@ def render_message_controls(msg: dict, mode: str, message_key: str):
     for idx, (action_key, label) in enumerate(FOLLOWUP_ACTIONS.items()):
         with controls[idx]:
             if st.button(label, key=f"follow_{message_key}_{action_key}", use_container_width=True):
-                queue_prompt(mode, build_followup_prompt(action_key, msg, mode), action_key=action_key)
+                followup_prompt = build_followup_prompt(action_key, msg, mode)
+                queue_prompt(mode, followup_prompt, action_key=action_key)
+                st.toast(f"Running {label}…", icon="🔄")
                 st.rerun()
 
     if st.button("Re-run With Stricter Grounding", key=f"strict_rerun_{message_key}", use_container_width=True):
@@ -5038,15 +5049,33 @@ def main():
     if prompt:
         if not already_logged_user_msg:
             ts = datetime.now().strftime("%b %d, %I:%M %p")
-            current_messages.append({"id": make_message_id(), "role": "user", "content": prompt, "timestamp": ts})
+
+            # For followup transforms, show a clean label instead of the full meta-prompt
+            if queued_action and queued_action in FOLLOWUP_ACTIONS:
+                action_label = FOLLOWUP_ACTIONS[queued_action]
+                display_text = f"🔄 {action_label}"
+            else:
+                display_text = prompt
+
+            current_messages.append({"id": make_message_id(), "role": "user", "content": display_text, "timestamp": ts})
 
             with st.chat_message("user"):
-                st.markdown(safe_markdown(prompt))
+                st.markdown(safe_markdown(display_text))
                 st.markdown(f'<div class="msg-ts">🕐 {ts}</div>', unsafe_allow_html=True)
 
         # ── Animated loading card inside the assistant bubble ────────────────────
         status_placeholder = st.empty()
-        loading_state = loading_state_for(current_mode)
+        if queued_action and queued_action in FOLLOWUP_ACTIONS:
+            action_label = FOLLOWUP_ACTIONS[queued_action]
+            loading_state = {
+                "icon": "🔄",
+                "label": f"Generating {action_label}…",
+                "sub": "Re-querying sources and reformatting the response.",
+                "steps": ["Retrieving sources", f"Building {action_label.lower()}", "Formatting"],
+                "min_display_seconds": 0.0,
+            }
+        else:
+            loading_state = loading_state_for(current_mode)
         loading_icon = loading_state["icon"]
         loading_label = loading_state["label"]
         loading_sub = loading_state["sub"]
@@ -5124,10 +5153,15 @@ def main():
 
             resp_ts = datetime.now().strftime("%b %d, %I:%M %p")
             cross = detect_cross_mode(response, current_mode) if current_mode in ("rulebook", "cba") else None
+            # For followup transforms, store the original question (before format instructions)
+            # so chained followups reference the right topic, not the meta-prompt.
+            stored_question = prompt
+            if queued_action and "\n\nRESPONSE FORMAT INSTRUCTION:" in prompt:
+                stored_question = prompt.split("\n\nRESPONSE FORMAT INSTRUCTION:")[0].strip()
             response_msg = {
                 "id": make_message_id(),
                 "role": "assistant",
-                "question": prompt,
+                "question": stored_question,
                 "content": response,
                 "citations": citations,
                 "timestamp": resp_ts,
