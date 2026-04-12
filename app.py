@@ -131,11 +131,9 @@ EXPORT_FORMATS = (
     "Game ruling summary",
 )
 FOLLOWUP_ACTIONS = {
-    "quote": "Exact clause",
     "fan": "Fan version",
-    "analyst": "Analyst memo",
     "hypothetical": "Hypothetical",
-    "bullets": "3 bullets",
+    "bullets": "Bullet summary",
 }
 QUICK_CHIPS = {
     "rulebook": [
@@ -1049,13 +1047,25 @@ def _sentence_like_chunks(text: str) -> list:
 def is_three_bullet_response(text: str) -> bool:
     non_empty = [line.strip() for line in text.splitlines() if line.strip()]
     bullets = [line for line in non_empty if re.match(r"^[-*•]\s+", line)]
-    return len(non_empty) == 3 and len(bullets) == 3
+    return len(non_empty) >= 3 and len(bullets) == len(non_empty)
 
 
 def enforce_three_bullet_response(text: str, citations: list, mode: str) -> str:
+    """Light cleanup: ensure the response is a clean set of bullet points.
+
+    If the model already returned bullets, keep them as-is.
+    Otherwise extract the key sentences and format them as bullets.
+    """
     if is_three_bullet_response(text):
         return text
 
+    # Try to extract existing bullet lines from a mixed response
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    bullet_lines = [line for line in lines if re.match(r"^[-*•]\s+", line)]
+    if len(bullet_lines) >= 3:
+        return "\n".join(bullet_lines[:5])
+
+    # Fallback: pull distinct sentences and format as bullets
     sections = parse_answer_sections(text)
     candidate_chunks = []
     for section_name in ("Answer", "Direct source support", "Careful inference"):
@@ -1072,50 +1082,35 @@ def enforce_three_bullet_response(text: str, citations: list, mode: str) -> str:
             continue
         seen.add(normalized)
         bullets.append(chunk.rstrip(".") + ".")
-        if len(bullets) == 3:
+        if len(bullets) == 5:
             break
 
     if not bullets:
         fallback = text.strip()
         return f"- {fallback}" if fallback else text
 
-    while len(bullets) < 3:
-        bullets.append(bullets[-1])
-
-    source_labels = [citation_title(citation, mode) for citation in dedupe_citations(citations)[:3]]
-    if not source_labels:
-        source_labels = ["grounded sources attached"]
-
-    formatted = []
-    for idx, bullet in enumerate(bullets[:3]):
-        label = source_labels[min(idx, len(source_labels) - 1)]
-        formatted.append(f"- {bullet} ({label})")
-    return "\n".join(formatted)
+    return "\n".join(f"- {b}" for b in bullets)
 
 
 def build_followup_prompt(action_key: str, msg: dict, mode: str) -> str:
     question = msg.get("question") or "the previous question"
     source_hint = "Use the same source type and keep citations grounded."
     prompts = {
-        "quote": (
-            f"Using the same topic as this earlier question: '{question}', give me the exact clause or closest verbatim source language only. "
-            f"Keep the answer quote-focused and concise. {source_hint}"
-        ),
         "fan": (
-            f"Rewrite your answer to this question for a casual NBA fan: '{question}'. "
-            f"Use plain language, short sentences, and keep the citations grounded. {source_hint}"
-        ),
-        "analyst": (
-            f"Rewrite your answer to this question as a front-office analyst memo: '{question}'. "
-            f"Lead with the key takeaway, then implications, then direct source support. {source_hint}"
+            f"Explain the answer to this question the way you'd explain it to a friend who watches basketball "
+            f"but has never read the CBA or rulebook: '{question}'. "
+            f"Avoid jargon, legal phrasing, and article references. Use everyday words, "
+            f"comparisons to real game situations, and keep it short — like a text message explanation, not a report. {source_hint}"
         ),
         "hypothetical": (
             f"For the earlier question '{question}', give me one realistic hypothetical example and walk through how the rule or CBA language applies. "
             f"Label assumptions clearly. {source_hint}"
         ),
         "bullets": (
-            f"Summarize your answer to '{question}' in exactly 3 markdown bullet points with grounded citations. "
-            f"Return only the three bullets and nothing else. Each bullet must be a single concise sentence. {source_hint}"
+            f"Give a concise bullet-point summary answering '{question}'. "
+            f"Each bullet should be an independent, self-contained takeaway — not a sentence copied from the earlier answer. "
+            f"Write each bullet as a short, direct statement that someone could read on its own and understand the key point. "
+            f"Use 3-5 bullets. No headers, no sub-bullets, no preamble. {source_hint}"
         ),
     }
     return prompts[action_key]
@@ -3109,7 +3104,7 @@ def render_source_panel(msg: dict, mode: str, message_key: str):
 
 def render_message_controls(msg: dict, mode: str, message_key: str):
     st.markdown('<div class="split-subhead">Follow-up transforms</div>', unsafe_allow_html=True)
-    controls = st.columns(5)
+    controls = st.columns(3)
     for idx, (action_key, label) in enumerate(FOLLOWUP_ACTIONS.items()):
         with controls[idx]:
             if st.button(label, key=f"follow_{message_key}_{action_key}", use_container_width=True):
