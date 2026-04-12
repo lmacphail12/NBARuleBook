@@ -248,6 +248,124 @@ RETRIEVAL_EXPANSIONS = {
         "luxury tax": "tax threshold repeater tax taxpayer non-taxpayer apron team salary",
     }
 }
+SLANG_GLOSSARY = {
+    "cba": {
+        "2nd apron":        "second apron Tax Level 2 team salary restrictions",
+        "second apron":     "second apron Tax Level 2 team salary restrictions",
+        "1st apron":        "first apron Tax Level 1 team salary restrictions",
+        "first apron":      "first apron Tax Level 1 team salary restrictions",
+        "hard cap":         "first apron hard cap restriction tax apron",
+        "bird rights":      "qualifying veteran free agent Bird exception",
+        "early bird":       "early qualifying veteran free agent early Bird",
+        "non-bird":         "non-qualifying free agent room exception",
+        "supermax":         "designated veteran player extension criteria",
+        "super max":        "designated veteran player extension criteria",
+        "max contract":     "maximum salary individual player maximum",
+        "max deal":         "maximum salary individual player maximum",
+        "vet min":          "veteran minimum salary",
+        "vet minimum":      "veteran minimum salary",
+        "MLE":              "mid-level salary exception non-taxpayer taxpayer",
+        "mid-level":        "mid-level salary exception",
+        "TPMLE":            "taxpayer mid-level exception",
+        "TPE":              "traded player exception",
+        "BAE":              "bi-annual exception",
+        "bi-annual":        "bi-annual exception",
+        "sign and trade":   "sign-and-trade transaction",
+        "sign-and-trade":   "sign-and-trade transaction",
+        "S&T":              "sign-and-trade transaction",
+        "RFA":              "restricted free agent qualifying offer",
+        "UFA":              "unrestricted free agent",
+        "QO":               "qualifying offer restricted free agent",
+        "10-day":           "10-day contract rest-of-season",
+        "ten-day":          "10-day contract rest-of-season",
+        "ten day":          "10-day contract rest-of-season",
+        "two-way":          "two-way contract G League NBA roster",
+        "2-way":            "two-way contract G League NBA roster",
+        "exhibit 10":       "Exhibit 10 contract G League bonus",
+        "over the cap":     "team salary exceeds salary cap over-the-cap",
+        "under the cap":    "team salary below salary cap room",
+        "cap hold":         "cap hold free agent incomplete roster charge",
+        "dead cap":         "dead money stretched waived player cap charge",
+        "dead money":       "dead money stretched waived player cap charge",
+        "stretch":          "stretched waived player remaining salary",
+        "stretch provision": "stretched waived player remaining salary",
+        "poison pill":      "offer sheet unlikely bonus criteria trade restriction",
+        "repeater":         "repeater tax incremental luxury tax",
+        "repeater tax":     "repeater tax incremental luxury tax",
+        "taxpayer":         "taxpayer team tax apron luxury tax",
+        "cap spike":        "salary cap increase BRI adjustment",
+        "gilbert arenas":   "Gilbert Arenas provision offer sheet restriction",
+        "arenas rule":      "Gilbert Arenas provision offer sheet restriction",
+        "arenas provision":  "Gilbert Arenas provision offer sheet restriction",
+        "over 38":          "over-36 rule over-38 rule contract allocation",
+        "over 36":          "over-36 rule contract allocation multi-year",
+        "over-38":          "over-36 rule over-38 rule contract allocation",
+        "over-36":          "over-36 rule contract allocation multi-year",
+        "rose rule":        "Derrick Rose rule designated player 30% max criteria",
+        "derrick rose":     "Derrick Rose rule designated player 30% max criteria",
+        "larry bird":       "Larry Bird exception qualifying veteran free agent",
+        "cap space":        "salary cap room available cap space team salary",
+        "room exception":   "room exception mid-level non-taxpayer",
+        "disabled player":  "disabled player exception injury replacement",
+        "DPE":              "disabled player exception injury replacement",
+        "hardship":         "hardship exception roster minimum active players",
+        "CBA":              "Collective Bargaining Agreement",
+        "no-trade":         "no-trade clause veto right player consent",
+        "NTC":              "no-trade clause veto right player consent",
+        "player option":    "player option early termination option",
+        "team option":      "team option club option contract year",
+        "opt out":          "early termination option player option decline",
+        "opt in":           "player option exercise option year",
+        "buyout":           "contract buyout negotiated release waiver",
+        "trade kicker":     "trade bonus 15% trade restriction unlikely bonus",
+        "sign-and-trade":   "sign-and-trade transaction base year compensation",
+        "base year":        "base year compensation BYC trade value",
+        "BYC":              "base year compensation trade value",
+        "LTBE":             "likely to be earned incentive bonus",
+        "NLTBE":            "not likely to be earned unlikely incentive bonus",
+        "cap smoothing":    "salary cap escalation BRI projection adjustment",
+        "minimum team salary": "salary floor minimum team salary requirement",
+        "salary floor":     "salary floor minimum team salary requirement",
+    },
+    "rulebook": {
+        "euro step":        "gather step legal move traveling",
+        "eurostep":         "gather step legal move traveling",
+        "hop step":         "jump stop gather step traveling",
+        "flop":             "unsportsmanlike act simulation flop warning",
+        "flopping":         "unsportsmanlike act simulation flop warning",
+        "hack-a":           "away from play foul deliberate strategy",
+        "hack a shaq":      "away from play foul deliberate strategy",
+        "intentional foul":  "away from play foul deliberate unsportsmanlike",
+        "take foul":        "take foul transition transition take foul",
+        "clear path":       "clear path foul fast break",
+        "and-1":            "shooting foul continuation basket counts free throw",
+        "and 1":            "shooting foul continuation basket counts free throw",
+        "and one":          "shooting foul continuation basket counts free throw",
+        "loose ball":       "loose ball foul neither team possession",
+        "charge":           "offensive foul charging restricted area",
+        "block/charge":     "offensive foul block charge restricted area cylinder",
+        "block charge":     "offensive foul block charge restricted area cylinder",
+        "restricted area":  "restricted area arc charge block lower defensive box",
+        "kicked ball":      "kicked ball violation intentional strike foot leg",
+        "lane violation":   "free throw lane violation rebound position",
+        "three in the key": "defensive three seconds key violation",
+        "3 in the key":     "defensive three seconds key violation",
+        "5 second":         "five-second inbound violation throw-in",
+        "8 second":         "eight-second backcourt violation",
+        "double dribble":   "discontinue dribble violation dribble",
+        "carry":            "palming carrying dribble violation",
+        "palming":          "palming carrying dribble violation",
+        "backcourt":        "backcourt violation over and back",
+        "over and back":    "backcourt violation over and back",
+        "tech":             "technical foul unsportsmanlike conduct",
+        "flagrant 1":       "flagrant foul penalty 1 unnecessary contact",
+        "flagrant 2":       "flagrant foul penalty 2 unnecessary excessive contact",
+        "rim hang":         "hanging on rim basket ring unsportsmanlike",
+        "delay of game":    "delay of game violation warning",
+        "coaches challenge": "coach's challenge instant replay review trigger",
+        "challenge":        "coach's challenge instant replay review trigger",
+    },
+}
 DOC_BROWSE_PRESETS = {
     "rulebook": ["Rule 4", "Rule 10", "Rule 11", "Rule 12", "Instant Replay", "Officials"],
     "both": ["Suspensions", "Waivers", "Discipline", "Roster limits", "Two-way rules", "Replay consequences"],
@@ -1158,12 +1276,86 @@ def build_status_timeline_html(active_stage: str, detail: str = "") -> str:
 
 
 def expand_query_for_retrieval(question: str, mode: str) -> str:
-    expansions = RETRIEVAL_EXPANSIONS.get(mode, {})
     question_lower = question.lower()
-    matched = [hint for phrase, hint in expansions.items() if phrase in question_lower]
-    if not matched:
+    hints = []
+
+    # 1) Slang glossary expansion — covers abbreviations and colloquial terms
+    glossary = SLANG_GLOSSARY.get(mode, {})
+    for slang, formal_terms in glossary.items():
+        if slang.lower() in question_lower:
+            hints.append(formal_terms)
+
+    # 2) Existing phrase-level expansions — broader topical hints
+    expansions = RETRIEVAL_EXPANSIONS.get(mode, {})
+    for phrase, hint in expansions.items():
+        if phrase in question_lower:
+            hints.append(hint)
+
+    if not hints:
         return question
-    return f"{question}\n\nRetrieval hints: {'; '.join(matched)}."
+    # Deduplicate while preserving order
+    seen = set()
+    unique_hints = []
+    for h in hints:
+        if h not in seen:
+            seen.add(h)
+            unique_hints.append(h)
+    return f"{question}\n\nRetrieval hints: {'; '.join(unique_hints)}."
+
+
+def rewrite_query_for_retrieval(question: str, mode: str, region_name: str = None) -> str:
+    """Use a fast LLM call to expand slang/colloquial terms into formal document language.
+
+    Only called when the static glossary in expand_query_for_retrieval did not fire,
+    so this handles novel slang the glossary doesn't cover yet.
+    """
+    try:
+        client = get_bedrock_client("bedrock-runtime", region_name)
+    except Exception:
+        client = None
+    if not client:
+        return question
+
+    if mode == "rulebook":
+        domain_context = "NBA Official Rulebook"
+    elif mode == "cba":
+        domain_context = "NBA Collective Bargaining Agreement (CBA) and Basketball Operations Manual"
+    else:
+        return question
+
+    system_prompt = f"""You are a query rewriter for an NBA {domain_context} retrieval system.
+
+Your job: take the user's question (which may use slang, abbreviations, nicknames, or casual basketball terminology) and rewrite it using the FORMAL terminology that appears in the official {domain_context}.
+
+Rules:
+- Keep the question's intent and meaning identical.
+- Replace slang, abbreviations, and nicknames with official terms.
+  Examples: "2nd apron" → "second apron / Tax Level 2", "bird rights" → "qualifying veteran free agent Bird exception", "MLE" → "mid-level salary exception", "euro step" → "gather step traveling", "hack-a" → "away-from-the-play foul".
+- Append 3-5 formal keyword hints at the end, prefixed with "Retrieval hints:".
+- Output ONLY the rewritten query. No explanation, no preamble.
+- If the query already uses formal terms, return it unchanged but still add keyword hints."""
+
+    try:
+        response = client.invoke_model(
+            modelId=DEFAULT_QUIZ_MODEL_ID,
+            contentType="application/json",
+            accept="application/json",
+            body=json.dumps({
+                "anthropic_version": "bedrock-2023-05-31",
+                "max_tokens": 250,
+                "temperature": 0.0,
+                "messages": [{"role": "user", "content": question}],
+                "system": system_prompt,
+            }),
+        )
+        result = json.loads(response["body"].read())
+        rewritten = result["content"][0]["text"].strip()
+        if rewritten and len(rewritten) > 5:
+            return rewritten
+    except Exception:
+        pass
+
+    return question
 
 
 def safe_markdown(text: str) -> str:
@@ -3271,7 +3463,7 @@ def build_vector_search_config(retrieval_settings: dict, number_of_results: int 
     results = number_of_results if number_of_results is not None else retrieval_settings.get("number_of_results", 5)
     vector_cfg = {"numberOfResults": max(1, int(results))}
 
-    search_type = retrieval_settings.get("search_type")
+    search_type = retrieval_settings.get("search_type", "HYBRID")
     if search_type in {"SEMANTIC", "HYBRID"}:
         vector_cfg["overrideSearchType"] = search_type
 
@@ -3308,7 +3500,13 @@ def query_knowledge_base(question: str, knowledge_base_id: str, model_arn: str,
     if use_session and session_id is None:
         session_id = str(uuid.uuid4())
 
-    prompt = build_query_prompt(question, mode, retrieval_settings)
+    # ── Query expansion: static glossary first, LLM rewrite as fallback ──
+    expanded_question = expand_query_for_retrieval(question, mode)
+    if expanded_question == question:
+        # Glossary didn't match — try LLM-based rewrite for novel slang
+        expanded_question = rewrite_query_for_retrieval(question, mode, region_name)
+
+    prompt = build_query_prompt(expanded_question, mode, retrieval_settings)
     vector_search_cfg = build_vector_search_config(retrieval_settings)
 
     params = {
@@ -3838,6 +4036,9 @@ def query_app_mode(
         run_expanded = False
         if allow_expanded_retry and needs_followup and (not cba_deep_guardrails or passes_run < 2):
             expanded_question = expand_query_for_retrieval(question, mode)
+            if expanded_question == question:
+                # Glossary didn't fire — try LLM rewrite for the retry path
+                expanded_question = rewrite_query_for_retrieval(question, mode, runtime_config.get("region"))
             run_expanded = expanded_question != question
 
         run_manual = allow_manual_fallback and needs_followup
