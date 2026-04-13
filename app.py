@@ -1216,6 +1216,121 @@ def is_simple_cba_question(question: str) -> bool:
     return 2 <= len(tokens) <= 14
 
 
+# ─────────────────────────────────────────────
+# HYPOTHETICAL / SCENARIO DETECTION
+# ─────────────────────────────────────────────
+_HYPOTHETICAL_PATTERNS = (
+    "what would happen",
+    "what happens if",
+    "what happens when",
+    "what if",
+    "what could happen",
+    "would it be possible",
+    "could a team",
+    "could a player",
+    "can a team",
+    "can a player",
+    "is it possible",
+    "is a team allowed",
+    "is a player allowed",
+    "would a team be able",
+    "suppose",
+    "imagine",
+    "hypothetically",
+    "hypothetical",
+    "let's say",
+    "let's assume",
+    "say a team",
+    "say a player",
+    "if a team",
+    "if a player",
+    "if the",
+    "scenario",
+    "in a situation where",
+    "how would",
+    "how could",
+    "how does this work if",
+    "would that mean",
+    "does that mean",
+    "are they allowed",
+    "is that allowed",
+    "would they be able",
+    "could they still",
+    "can they still",
+    "would the team still",
+    "are they still able",
+)
+
+
+def is_hypothetical_question(question: str) -> bool:
+    """Detect whether a question is a hypothetical / scenario that requires
+    reasoning over retrieved rules rather than a direct lookup."""
+    lower = question.lower().strip()
+    # Quick pattern check
+    if any(lower.startswith(p) or f" {p}" in f" {lower}" for p in _HYPOTHETICAL_PATTERNS):
+        return True
+    # Conditional phrasing with question mark
+    if "?" in question and re.search(r"\b(if|when|suppose|imagine|say)\b.*\b(can|could|would|will|does|do|is|are)\b", lower):
+        return True
+    return False
+
+
+def extract_hypothetical_topics(question: str, mode: str, region_name: str = None) -> list:
+    """Use a fast LLM call to decompose a hypothetical question into
+    2-4 concrete rule/CBA topics suitable for KB retrieval."""
+    try:
+        client = get_bedrock_client("bedrock-runtime", region_name)
+    except Exception:
+        client = None
+    if not client:
+        return []
+
+    if mode == "rulebook":
+        domain = "NBA Official Rulebook"
+    elif mode == "cba":
+        domain = "NBA Collective Bargaining Agreement (CBA) and Basketball Operations Manual"
+    else:
+        domain = "NBA Rulebook and CBA"
+
+    system_prompt = f"""You are a query decomposer for an NBA {domain} retrieval system.
+
+The user asked a hypothetical or scenario question. Your job is to extract the 2-4 specific
+rules, provisions, or topics that need to be looked up in the {domain} to properly answer
+this scenario.
+
+Rules:
+- Output a JSON array of 2-4 short retrieval queries (each 3-8 words).
+- Each query should target a SPECIFIC rule, article, provision, or definition — not the scenario itself.
+- Use formal document terminology, not slang.
+- Output ONLY the JSON array. No explanation, no markdown fences."""
+
+    try:
+        response = client.invoke_model(
+            modelId=DEFAULT_QUIZ_MODEL_ID,
+            contentType="application/json",
+            accept="application/json",
+            body=json.dumps({
+                "anthropic_version": "bedrock-2023-05-31",
+                "max_tokens": 200,
+                "temperature": 0.0,
+                "messages": [{"role": "user", "content": question}],
+                "system": system_prompt,
+            }),
+        )
+        result = json.loads(response["body"].read())
+        raw_text = result["content"][0]["text"].strip()
+        # Strip markdown fences if present
+        raw_text = re.sub(r"^```(?:json)?\s*", "", raw_text)
+        raw_text = re.sub(r"\s*```$", "", raw_text)
+        topics = json.loads(raw_text)
+        if isinstance(topics, list) and all(isinstance(t, str) for t in topics):
+            return topics[:4]
+    except Exception:
+        pass
+
+    return []
+
+
 def starter_prompt_for(mode: str, label: str) -> str:
     mapped = STARTER_PROMPTS.get(mode, {}).get(label)
     if mapped:
@@ -3773,6 +3888,169 @@ def manual_retrieve_and_answer(question: str, knowledge_base_id: str, model_arn:
         return None, filtered_citations
 
 
+# ─────────────────────────────────────────────
+# HYPOTHETICAL / SCENARIO RETRIEVAL + REASONING
+# ─────────────────────────────────────────────
+def build_hypothetical_answer_prompt(question: str, mode: str, retrieval_settings: dict, source_text: str) -> str:
+    """Build a prompt that asks the model to reason through a hypothetical scenario
+    using only the retrieved source material."""
+    if mode == "rulebook":
+        domain_intro = "You are an expert NBA rules analyst."
+        domain_label = "NBA Rulebook"
+    else:
+        domain_intro = "You are an expert on the NBA CBA and Basketball Operations Manual."
+        domain_label = "NBA CBA / Operations Manual"
+
+    inference_instruction = (
+        "If the retrieved material does not directly resolve part of the scenario, say that plainly."
+        if retrieval_settings.get("strict_grounding", True)
+        else "If needed, include careful inference, but label it clearly."
+    )
+
+    return f"""{domain_intro}
+
+The user asked a hypothetical scenario question. Your job is to reason through this scenario
+step by step using ONLY the {domain_label} source excerpts provided below.
+
+User's question: {question}
+
+Instructions:
+1. Identify which rules or provisions apply to each part of the scenario.
+2. Walk through the scenario step by step, citing specific rules/articles from the source material.
+3. {inference_instruction}
+4. Use this answer structure:
+   Answer:
+   (Walk through the scenario step by step, explaining what each relevant rule says and how it applies)
+   Direct source support:
+   (List the specific rules/articles that govern this scenario)
+   Careful inference (if any):
+   (Note anything that requires interpretation or that the sources don't fully cover)
+5. Do not invent rule numbers, article numbers, salary figures, or procedures.
+6. Be specific about what IS and IS NOT allowed under the rules.
+
+SOURCE EXCERPTS:
+{source_text}
+
+Answer:
+"""
+
+
+def hypothetical_retrieve_and_answer(question: str, knowledge_base_id: str, model_arn: str,
+                                      mode: str, region_name: str, retrieval_settings: dict,
+                                      status_cb=None):
+    """Handle hypothetical/scenario questions by:
+    1. Extracting the underlying rule topics from the scenario
+    2. Running targeted KB retrievals for each topic
+    3. Passing all retrieved context + the original question to the LLM for step-by-step reasoning
+    """
+    def status(stage: str, detail: str = ""):
+        if status_cb:
+            status_cb(stage, detail)
+
+    rag_client = get_bedrock_client("bedrock-agent-runtime", region_name)
+    runtime_client = get_bedrock_runtime_client(region_name)
+    if not rag_client or not runtime_client:
+        return None, []
+
+    # Step 1: Extract retrievable topics from the hypothetical
+    status("retrieving", "Decomposing scenario into rule topics")
+    topics = extract_hypothetical_topics(question, mode, region_name)
+
+    if not topics:
+        # Fallback: use glossary expansion + the raw question
+        expanded = expand_query_for_retrieval(question, mode)
+        topics = [question]
+        if expanded != question and "Retrieval hints:" in expanded:
+            hints_text = expanded.split("Retrieval hints:", 1)[1].replace(";", " ").strip()
+            topics.append(hints_text)
+
+    # Step 2: Retrieve KB chunks for each extracted topic
+    status("retrieving", f"Searching {len(topics)} rule topics")
+    raw_citations = []
+    seen = set()
+    for topic in topics:
+        # Also run the topic through glossary expansion for better retrieval
+        expanded_topic = expand_query_for_retrieval(topic, mode)
+        queries_to_run = [expanded_topic]
+        if expanded_topic == topic:
+            queries_to_run = [topic]
+
+        for query in queries_to_run:
+            manual_vector_cfg = build_vector_search_config(
+                retrieval_settings,
+                number_of_results=max(retrieval_settings.get("number_of_results", 5), 5),
+            )
+            try:
+                retrieval_resp = rag_client.retrieve(
+                    knowledgeBaseId=knowledge_base_id,
+                    retrievalQuery={"text": query},
+                    retrievalConfiguration={
+                        "vectorSearchConfiguration": manual_vector_cfg
+                    },
+                )
+            except Exception:
+                continue
+
+            for result in retrieval_resp.get("retrievalResults", []):
+                text = result.get("content", {}).get("text", "").strip()
+                if is_low_signal_chunk(text):
+                    continue
+                location = result.get("location", {}).get("s3Location", {})
+                uri = location.get("uri", "Unknown source")
+                metadata = result.get("metadata", {})
+                fingerprint = (text[:180], uri.split("#")[0])
+                if fingerprint in seen:
+                    continue
+                seen.add(fingerprint)
+                raw_citations.append({
+                    "content": text,
+                    "uri": uri,
+                    "metadata": metadata,
+                })
+
+    # Step 3: Filter and rank citations
+    status("ranking", f"{len(raw_citations)} source chunks retrieved")
+    filtered_citations = filter_relevant_citations(
+        raw_citations,
+        question,
+        max_sources=max(retrieval_settings.get("max_sources", 4), 5),
+        exact_match_bias=False,
+    )
+    if not filtered_citations:
+        return None, []
+
+    for citation in filtered_citations:
+        citation["source_domain"] = mode
+
+    # Step 4: Build source text and send to LLM for reasoning
+    status("drafting", "Reasoning through scenario")
+    source_blocks = []
+    for citation in filtered_citations:
+        label = citation_title(citation, mode)
+        source_blocks.append(f"[{label}]\n{citation['content']}")
+    source_text = "\n\n---\n\n".join(source_blocks)
+
+    prompt = build_hypothetical_answer_prompt(question, mode, retrieval_settings, source_text)
+
+    try:
+        response = runtime_client.invoke_model(
+            modelId=model_arn,
+            contentType="application/json",
+            accept="application/json",
+            body=json.dumps({
+                "anthropic_version": "bedrock-2023-05-31",
+                "max_tokens": 1200,
+                "temperature": 0.0,
+                "messages": [{"role": "user", "content": prompt}],
+            }),
+        )
+        result = json.loads(response["body"].read())
+        text = result.get("content", [{}])[0].get("text", "")
+        return text, filtered_citations
+    except Exception:
+        return None, filtered_citations
+
+
 def combine_crossbook_answers(question: str, rulebook_text: str, cba_text: str) -> str:
     rulebook_sections = parse_answer_sections(rulebook_text)
     cba_sections = parse_answer_sections(cba_text)
@@ -4094,6 +4372,41 @@ def query_app_mode(
             needs_followup = needs_reformulation(response, citations)
             status("ranking", f"{len(citations)} source matches")
 
+        # ── Hypothetical scenario fallback ──────────────────────────────
+        # If the question is a scenario/hypothetical and retrieval still
+        # hasn't produced a solid answer, decompose the scenario into
+        # individual rule topics, retrieve each, and reason through it.
+        if needs_followup and is_hypothetical_question(question):
+            status("retrieving", "Scenario detected — decomposing into rule topics")
+            hypo_response, hypo_citations = hypothetical_retrieve_and_answer(
+                question,
+                runtime_config["kb_id"],
+                primary_model_arn,
+                mode,
+                runtime_config["region"],
+                retrieval_settings,
+                status_cb=status_cb,
+            )
+            if hypo_response and hypo_citations:
+                if better_candidate(response, citations, hypo_response, hypo_citations):
+                    response, citations = hypo_response, hypo_citations
+                    needs_followup = needs_reformulation(response, citations)
+        # If the question is hypothetical but standard retrieval already
+        # succeeded, still check if hypothetical reasoning would be richer.
+        elif not needs_followup and is_hypothetical_question(question) and len(citations) <= 2:
+            status("retrieving", "Enriching scenario with additional rule lookups")
+            hypo_response, hypo_citations = hypothetical_retrieve_and_answer(
+                question,
+                runtime_config["kb_id"],
+                primary_model_arn,
+                mode,
+                runtime_config["region"],
+                retrieval_settings,
+                status_cb=status_cb,
+            )
+            if hypo_response and hypo_citations and len(hypo_citations) > len(citations):
+                response, citations = hypo_response, hypo_citations
+
         status("drafting", "Composing grounded answer")
         if not stateless_mode:
             st.session_state.session_ids[mode] = new_session
@@ -4205,6 +4518,52 @@ def query_app_mode(
                     cba_response, cba_citations = cba_new_response, cba_new_citations
 
     status("ranking", f"{len(rb_citations) + len(cba_citations)} combined source matches")
+
+    # ── Hypothetical fallback for crossbook mode ──────────────────
+    # If the question is a scenario and either lane is still weak, try
+    # the hypothetical decomposition path for the weak lane(s).
+    if is_hypothetical_question(question):
+        rb_still_weak = needs_reformulation(rb_response, rb_citations)
+        cba_still_weak = needs_reformulation(cba_response, cba_citations)
+        if rb_still_weak or cba_still_weak:
+            status("retrieving", "Scenario detected — decomposing for weak lane(s)")
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                rb_hypo_future = (
+                    pool.submit(
+                        hypothetical_retrieve_and_answer,
+                        question,
+                        rulebook_config["kb_id"],
+                        rulebook_config["model_arn"],
+                        "rulebook",
+                        rulebook_config["region"],
+                        retrieval_settings,
+                    )
+                    if rb_still_weak
+                    else None
+                )
+                cba_hypo_future = (
+                    pool.submit(
+                        hypothetical_retrieve_and_answer,
+                        question,
+                        cba_config["kb_id"],
+                        cba_config["model_arn"],
+                        "cba",
+                        cba_config["region"],
+                        retrieval_settings,
+                    )
+                    if cba_still_weak
+                    else None
+                )
+                if rb_hypo_future:
+                    hypo_rb_resp, hypo_rb_cits = rb_hypo_future.result()
+                    if hypo_rb_resp and hypo_rb_cits and better_candidate(rb_response, rb_citations, hypo_rb_resp, hypo_rb_cits):
+                        rb_response, rb_citations = hypo_rb_resp, hypo_rb_cits
+                if cba_hypo_future:
+                    hypo_cba_resp, hypo_cba_cits = cba_hypo_future.result()
+                    if hypo_cba_resp and hypo_cba_cits and better_candidate(cba_response, cba_citations, hypo_cba_resp, hypo_cba_cits):
+                        cba_response, cba_citations = hypo_cba_resp, hypo_cba_cits
+            status("ranking", f"{len(rb_citations) + len(cba_citations)} combined source matches (after scenario)")
+
     st.session_state.session_ids["both_rulebook"] = rb_session
     st.session_state.session_ids["both_cba"] = cba_session
 
@@ -5072,6 +5431,14 @@ def main():
                 "label": f"Generating {action_label}…",
                 "sub": "Re-querying sources and reformatting the response.",
                 "steps": ["Retrieving sources", f"Building {action_label.lower()}", "Formatting"],
+                "min_display_seconds": 0.0,
+            }
+        elif is_hypothetical_question(prompt):
+            loading_state = {
+                "icon": "🔬",
+                "label": "Analyzing scenario…",
+                "sub": "Breaking down your hypothetical into rule topics, retrieving each, then reasoning through the scenario.",
+                "steps": ["Decomposing scenario", "Retrieving rule topics", "Reasoning through scenario"],
                 "min_display_seconds": 0.0,
             }
         else:
