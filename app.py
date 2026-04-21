@@ -287,7 +287,11 @@ SLANG_GLOSSARY = {
         "dead money":       "dead money stretched waived player cap charge",
         "stretch":          "stretched waived player remaining salary",
         "stretch provision": "stretched waived player remaining salary",
-        "poison pill":      "offer sheet unlikely bonus criteria trade restriction",
+        "poison pill":      "poison pill provision offer sheet restricted free agent trade value average annual salary matching purposes different outgoing incoming calculation matched offer sheet team",
+        "poison pill contract": "poison pill provision offer sheet restricted free agent trade value average annual salary matching purposes different outgoing incoming calculation matched offer sheet team",
+        "poison pill provision": "poison pill provision offer sheet restricted free agent trade value average annual salary matching purposes matched offer sheet team",
+        "offer sheet":      "offer sheet restricted free agent matching rights qualifying offer first refusal Gilbert Arenas",
+        "matched offer":    "matched offer sheet restricted free agent trade restrictions poison pill average salary",
         "repeater":         "repeater tax incremental luxury tax",
         "repeater tax":     "repeater tax incremental luxury tax",
         "taxpayer":         "taxpayer team tax apron luxury tax",
@@ -1186,6 +1190,23 @@ def needs_reformulation(response: str, citations: list) -> bool:
         "error querying knowledge base",
         "aws error",
         "unable to assist",
+        "search results provided do not contain",
+        "search results do not contain",
+        "sources do not contain",
+        "sources do not include",
+        "do not include the",
+        "do not include information",
+        "no information in the provided",
+        "no information about",
+        "no specific information",
+        "search results do not mention",
+        "not in the provided sources",
+        "not in the retrieved",
+        "retrieved sources do not",
+        "retrieved material does not",
+        "would need information about",
+        "to properly answer this question, i would need",
+        "the provided sources do not",
     )
     return (not citations) or any(marker in response.lower() for marker in unresolved_markers)
 
@@ -1261,13 +1282,31 @@ _HYPOTHETICAL_PATTERNS = (
     "are they still able",
 )
 
+# Regex patterns that catch scenario questions with flexible subjects
+# e.g. "Can team A trade...", "Could the Lakers sign...", "Would Brooklyn be able to..."
+_HYPOTHETICAL_REGEX_PATTERNS = (
+    # "Can/Could/Would [subject] [transactional verb]"
+    re.compile(r"^(can|could|would|will|should|is|are|does|do)\b.{1,40}\b(trade|sign|waive|release|extend|convert|claim|acquire|match|offer|use|send|receive|absorb|aggregate|include)\b", re.IGNORECASE),
+    # "If [subject] [verb]" without question mark
+    re.compile(r"^if\b.{1,50}\b(trade|sign|waive|release|extend|convert|claim|acquire|send|receive|use|offer|match)\b", re.IGNORECASE),
+    # Questions containing specific dollar amounts or salary figures — inherently scenario-based
+    re.compile(r"\$\s*\d+[\d,.]*\s*(m|mm|mil|million|k|thousand)?", re.IGNORECASE),
+    # "making $X" or "worth $X" or "earning $X" — scenario with salary specifics
+    re.compile(r"\b(making|earning|worth|owed|salary of|contract of|valued at)\b.*\$", re.IGNORECASE),
+    # "a player making" or "a team with" — scenario framing
+    re.compile(r"\b(a|the)\s+(player|team|club)\b.{1,30}\b(making|earning|with|over|under|above|below|at)\b", re.IGNORECASE),
+)
+
 
 def is_hypothetical_question(question: str) -> bool:
     """Detect whether a question is a hypothetical / scenario that requires
     reasoning over retrieved rules rather than a direct lookup."""
     lower = question.lower().strip()
-    # Quick pattern check
+    # Quick pattern check — exact prefix or substring match
     if any(lower.startswith(p) or f" {p}" in f" {lower}" for p in _HYPOTHETICAL_PATTERNS):
+        return True
+    # Regex patterns — catch flexible subjects, dollar amounts, scenario framing
+    if any(pattern.search(question) for pattern in _HYPOTHETICAL_REGEX_PATTERNS):
         return True
     # Conditional phrasing with question mark
     if "?" in question and re.search(r"\b(if|when|suppose|imagine|say)\b.*\b(can|could|would|will|does|do|is|are)\b", lower):
@@ -1300,9 +1339,20 @@ this scenario.
 
 Rules:
 - Output a JSON array of 2-4 short retrieval queries (each 3-8 words).
-- Each query should target a SPECIFIC rule, article, provision, or definition — not the scenario itself.
+- Each query should target a SPECIFIC rule, article, provision, or definition — NOT the scenario itself.
+- NEVER include specific dollar amounts, player names, or team names in your queries. Replace them with the formal rule concept.
 - Use formal document terminology, not slang.
-- Output ONLY the JSON array. No explanation, no markdown fences."""
+- Output ONLY the JSON array. No explanation, no markdown fences.
+
+Examples:
+User: "Can team A trade a player making $50M for 2 players making a combined $38M"
+Output: ["trade salary matching rules percentages", "outgoing incoming salary trade requirements", "over the cap trade restrictions", "traded player exception aggregation rules"]
+
+User: "What if the Lakers sign a free agent using the MLE while over the first apron"
+Output: ["mid-level salary exception taxpayer", "first apron signing restrictions", "hard cap implications mid-level exception"]
+
+User: "Could a player on a two-way contract be included in a trade"
+Output: ["two-way contract trade eligibility", "two-way player roster status restrictions", "trade rules player contract types"]"""
 
     try:
         response = client.invoke_model(
@@ -1410,6 +1460,47 @@ def expand_query_for_retrieval(question: str, mode: str) -> str:
         if phrase in question_lower:
             hints.append(hint)
 
+    # 3) Contextual pattern detection — questions with dollar amounts or
+    #    specific numbers that signal scenario-based rule lookups.
+    #    The KB contains rules, not specific dollar examples, so we inject
+    #    the formal topic terms the rules use.
+    has_dollar = bool(re.search(r"\$\s*\d", question))
+    has_number = bool(re.search(r"\b\d+\s*(m|mm|mil|million|k|thousand)?\b", question_lower))
+
+    if mode == "cba" and (has_dollar or has_number):
+        if re.search(r"\btrad(e|ing|ed)\b", question_lower):
+            hints.append(
+                "trade salary matching rules outgoing salary incoming salary "
+                "over-the-cap trade 125% plus $100,000 traded player exception "
+                "aggregation simultaneous trade first apron second apron trade restrictions"
+            )
+        if re.search(r"\bsign(ing|ed)?\b", question_lower) or "free agent" in question_lower:
+            hints.append(
+                "salary cap room exception mid-level exception sign-and-trade "
+                "maximum salary minimum salary Bird exception cap space"
+            )
+        if re.search(r"\bcontract\b|\bextend|\bextension\b", question_lower):
+            hints.append(
+                "maximum salary contract extension designated veteran player "
+                "over-36 rule salary increases raises annual percentage"
+            )
+        if re.search(r"\bcap\s*space\b|\broom\b|\bunder the cap\b|\bover the cap\b", question_lower):
+            hints.append(
+                "salary cap team salary cap room cap hold exceptions "
+                "over-the-cap under-the-cap team salary calculation"
+            )
+        if re.search(r"\btax\b|\bapron\b|\bluxury\b", question_lower):
+            hints.append(
+                "luxury tax threshold first apron second apron tax level "
+                "taxpayer restrictions repeater tax hard cap"
+            )
+        # Generic salary/player value questions
+        if re.search(r"\b(making|earning|salary of|worth|owed|paid)\b", question_lower) and not hints:
+            hints.append(
+                "salary matching rules maximum salary minimum salary "
+                "over-the-cap exceptions trade rules"
+            )
+
     if not hints:
         return question
     # Deduplicate while preserving order
@@ -1471,6 +1562,75 @@ Rules:
         rewritten = result["content"][0]["text"].strip()
         if rewritten and len(rewritten) > 5:
             return rewritten
+    except Exception:
+        pass
+
+    return question
+
+
+def define_unknown_term(question: str, mode: str, region_name: str = None) -> str:
+    """When standard retrieval fails, use an LLM to generate a definitional
+    expansion of any unfamiliar term in the question. This produces a rich
+    descriptive query in formal CBA/Rulebook language that's much more
+    likely to find relevant chunks than the original question.
+
+    This is a last-resort fallback for terms the glossary doesn't cover.
+    Returns an expanded query with definitional language, or the original
+    question if the call fails.
+    """
+    try:
+        client = get_bedrock_client("bedrock-runtime", region_name)
+    except Exception:
+        client = None
+    if not client:
+        return question
+
+    if mode == "rulebook":
+        domain_context = "NBA Official Rulebook"
+        domain_topics = "game rules, fouls, violations, officiating, replay review, scoring, and game administration"
+    elif mode == "cba":
+        domain_context = "NBA Collective Bargaining Agreement (CBA) and Basketball Operations Manual"
+        domain_topics = (
+            "salary cap, luxury tax, apron rules, contracts, free agency, "
+            "trades, waivers, exceptions, restricted free agency, offer sheets, "
+            "designated players, and roster management"
+        )
+    else:
+        return question
+
+    system_prompt = f"""You are a definitional expansion engine for an NBA {domain_context} retrieval system.
+
+The user's question contains a term or concept the retrieval system could not find. Your job is to produce a 2-3 sentence DEFINITIONAL DESCRIPTION of the unfamiliar concept using the formal terminology, mechanics, and rule references that would appear in the {domain_context}.
+
+Focus areas: {domain_topics}.
+
+Rules:
+- Identify the unfamiliar term in the user's question.
+- Write 2-3 sentences that DESCRIBE the underlying mechanic using words the {domain_context} would actually use (e.g., instead of "poison pill" write "offer sheet signed by a restricted free agent where the salary in later years is much higher than year 1, causing the trade value to be calculated as the average annual salary rather than the year-by-year salary, making the player difficult to trade").
+- Include the formal CBA/Rulebook terms, article numbers if well-known, and the practical mechanic.
+- Do NOT answer the question. Do NOT speculate beyond the definition.
+- Output ONLY the definitional description — no preamble, no JSON, no bullet points.
+- If the question uses only standard formal terminology, output the question unchanged."""
+
+    try:
+        response = client.invoke_model(
+            modelId=DEFAULT_QUIZ_MODEL_ID,
+            contentType="application/json",
+            accept="application/json",
+            body=json.dumps({
+                "anthropic_version": "bedrock-2023-05-31",
+                "max_tokens": 300,
+                "temperature": 0.0,
+                "messages": [{"role": "user", "content": question}],
+                "system": system_prompt,
+            }),
+        )
+        result = json.loads(response["body"].read())
+        definition = result["content"][0]["text"].strip()
+        if definition and len(definition) > 20 and definition.lower() != question.lower():
+            # Return the original question PLUS the definitional expansion so the
+            # KB has both the user's exact wording and the formal description.
+            return f"{question}\n\nConcept description for retrieval: {definition}"
     except Exception:
         pass
 
@@ -3917,16 +4077,21 @@ User's question: {question}
 Instructions:
 1. Identify which rules or provisions apply to each part of the scenario.
 2. Walk through the scenario step by step, citing specific rules/articles from the source material.
-3. {inference_instruction}
-4. Use this answer structure:
+3. When the user's question includes specific dollar amounts, player counts, or other numbers,
+   APPLY the rules from the sources to those specific numbers. Show the math or thresholds.
+   For example, if the rule says "125% plus $100,000", apply that formula to the user's figures.
+4. {inference_instruction}
+5. State a clear YES/NO/DEPENDS conclusion when the scenario asks whether something is allowed.
+6. Use this answer structure:
    Answer:
-   (Walk through the scenario step by step, explaining what each relevant rule says and how it applies)
+   (State the conclusion first, then walk through the scenario step by step, explaining what each relevant rule says and how it applies to the specific situation described)
    Direct source support:
    (List the specific rules/articles that govern this scenario)
    Careful inference (if any):
    (Note anything that requires interpretation or that the sources don't fully cover)
-5. Do not invent rule numbers, article numbers, salary figures, or procedures.
-6. Be specific about what IS and IS NOT allowed under the rules.
+7. Do not invent rule numbers, article numbers, salary figures, or procedures.
+8. If key information is missing (e.g. whether the team is over or under the cap), note what
+   additional facts would change the answer and explain each case.
 
 SOURCE EXCERPTS:
 {source_text}
@@ -4406,6 +4571,28 @@ def query_app_mode(
             )
             if hypo_response and hypo_citations and len(hypo_citations) > len(citations):
                 response, citations = hypo_response, hypo_citations
+
+        # ── Unknown-term definitional fallback ──────────────────────────
+        # If retrieval still hasn't produced a grounded answer, the question
+        # may contain a slang term, nickname, or informal concept the glossary
+        # doesn't cover. Use an LLM to generate a definitional expansion of
+        # the unfamiliar term in formal CBA/Rulebook language, then re-retrieve.
+        if needs_reformulation(response, citations):
+            status("retrieving", "Expanding unfamiliar term definition")
+            defined_query = define_unknown_term(question, mode, runtime_config.get("region"))
+            if defined_query != question:
+                status("retrieving", "Re-searching with definitional context")
+                def_response, def_citations, _ = query_knowledge_base(
+                    defined_query,
+                    runtime_config["kb_id"],
+                    primary_model_arn,
+                    mode,
+                    session_id=None,  # fresh session to avoid contamination
+                    region_name=runtime_config["region"],
+                    retrieval_settings=retrieval_settings,
+                )
+                if def_response and def_citations and better_candidate(response, citations, def_response, def_citations):
+                    response, citations = def_response, def_citations
 
         status("drafting", "Composing grounded answer")
         if not stateless_mode:
